@@ -1,0 +1,11 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "shell",
+			"label": "Build ESP32-C3 Project",
+			"command": "platformio run",
+			"group": "build"
+		}
+	]
+}
