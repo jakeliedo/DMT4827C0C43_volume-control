@@ -47,6 +47,7 @@ bool frameStarted = false;
 void connectToWiFi();
 void sendVolumeToMezzo(int volume);
 void sendVolumeToZone(uint16_t vpAddress, int volume);
+void discoverMezzoEndpoints();
 int mapVPToVolume(uint16_t vpData);
 void processDMTFrame(uint8_t* frame, int frameLength);
 void handleDMTData();
@@ -78,6 +79,12 @@ void setup() {
   
   // Connect to WiFi
   connectToWiFi();
+  
+  // Discover available API endpoints for debugging
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("🔍 Running API endpoint discovery...");
+    discoverMezzoEndpoints();
+  }
   
   Serial.println("=== System Ready ===\n");
 }
@@ -210,10 +217,10 @@ void sendVolumeToZone(uint16_t vpAddress, int volume) {
         const char* name;
     };
     const ZoneInfo zones[] = {
-        {0x1100, 1868704442, 1, "Zone 1"}, //Vp đúng zone -1
-        {0x1200, 4127125795, 2, "Zone 2"}, //VP đúng zone -1
-        {0x1300, 2170320301, 3, "Zone 3"}, //VP đúng zone -1
-        {0x1400, 2525320065, 4, "Zone 4"}  //đúng VP đúng zone
+        {0x1100, 1868704443, 5, "Zone 1"}, // Actual zone control index 5, corrected Zone ID from .har
+        {0x1200, 4127125796, 6, "Zone 2"}, // Actual zone control index 6, corrected Zone ID from .har
+        {0x1300, 2170320302, 7, "Zone 3"}, // Actual zone control index 7, corrected Zone ID from .har
+        {0x1400, 2525320065, 8, "Zone 4"}  // Actual zone control index 8, Zone ID matches .har
     };
     const int numZones = sizeof(zones) / sizeof(zones[0]);
     int zoneIdx = -1;
@@ -252,12 +259,22 @@ void sendVolumeToZone(uint16_t vpAddress, int volume) {
     
     Serial.printf("🔊 Sending volume %d%% (Gain: %.5f) to %s (ZoneId: %u, zoneNumber: %d)\n", volume, gain, zones[zoneIdx].name, zones[zoneIdx].zoneId, zones[zoneIdx].zoneNumber);
     HTTPClient http;
-    String url = String("http://") + mezzoIP + "/iv/views/web/730665316/zone-controls/" + String(zones[zoneIdx].zoneNumber);
-    Serial.print("📡 Connecting to: ");
-    Serial.println(url);
-    http.begin(url);
+    
+    // Chỉ sử dụng primary URL và Installation-Client-Id đúng
+    String url1 = String("http://") + mezzoIP + "/iv/views/web/730665316/zone-controls/" + String(zones[zoneIdx].zoneNumber);
+    String url2 = String("http://") + mezzoIP + "/api/zones/" + String(zones[zoneIdx].zoneId) + "/volume";
+    String url3 = String("http://") + mezzoIP + "/zones/" + String(zones[zoneIdx].zoneNumber) + "/gain";
+    
+    Serial.print("📡 Primary URL: ");
+    Serial.println(url1);
+    Serial.print("📡 Alternative URL 1: ");
+    Serial.println(url2);
+    Serial.print("📡 Alternative URL 2: ");
+    Serial.println(url3);
+    
+    http.begin(url1);
     http.addHeader("Content-Type", "application/json");
-    http.addHeader("Installation-Client-Id", "ca399b24-ed68-479a-9548-743314c25783");
+    http.addHeader("Installation-Client-Id", "0add066f-0458-4a61-9f57-c3a82fbb63f9");
     http.addHeader("Origin", String("http://") + mezzoIP);
     http.addHeader("Referer", String("http://") + mezzoIP + "/webapp/views/730665316");
     http.setTimeout(5000);
@@ -273,19 +290,69 @@ void sendVolumeToZone(uint16_t vpAddress, int volume) {
     Serial.println(jsonString);
     Serial.println("🔍 DEBUG: HTTP Headers:");
     Serial.println("   Content-Type: application/json");
-    Serial.println("   Installation-Client-Id: ca399b24-ed68-479a-9548-743314c25783");
+    Serial.println("   Installation-Client-Id: 0add066f-0458-4a61-9f57-c3a82fbb63f9");
     Serial.printf("   Origin: http://%s\n", mezzoIP);
     Serial.printf("   Referer: http://%s/webapp/views/730665316\n", mezzoIP);
-    
     unsigned long startTime = millis();
     int httpResponseCode = http.PUT(jsonString);
     unsigned long responseTime = millis() - startTime;
+    
+    // If first attempt fails with 404, try alternative endpoints
+    if (httpResponseCode == 404) {
+        Serial.println("🔄 Primary endpoint returned 404, trying alternative endpoints...");
+        http.end();
+        
+        // Try alternative endpoint 1: Direct API
+        Serial.print("📡 Trying alternative URL: ");
+        Serial.println(url2);
+        
+        http.begin(url2);
+        http.addHeader("Content-Type", "application/json");
+        http.setTimeout(5000);
+        
+        // Create simpler JSON payload for direct API
+        JsonDocument doc2;
+        doc2["volume"] = volume;
+        doc2["gain"] = gain;
+        
+        String jsonString2;
+        serializeJson(doc2, jsonString2);
+        Serial.print("📤 Sending alternative JSON: ");
+        Serial.println(jsonString2);
+        
+        httpResponseCode = http.POST(jsonString2);
+        responseTime = millis() - startTime;
+        
+        if (httpResponseCode == 404) {
+            Serial.println("🔄 Alternative endpoint 1 also returned 404, trying endpoint 2...");
+            http.end();
+            
+            // Try alternative endpoint 2: Simple zones endpoint
+            Serial.print("📡 Trying second alternative URL: ");
+            Serial.println(url3);
+            
+            http.begin(url3);
+            http.addHeader("Content-Type", "application/json");
+            http.setTimeout(5000);
+            
+            // Create even simpler JSON payload
+            JsonDocument doc3;
+            doc3["gain"] = gain;
+            
+            String jsonString3;
+            serializeJson(doc3, jsonString3);
+            Serial.print("📤 Sending simple JSON: ");
+            Serial.println(jsonString3);
+            
+            httpResponseCode = http.PUT(jsonString3);
+            responseTime = millis() - startTime;
+        }
+    }
     if (httpResponseCode > 0) {
         String response = http.getString();
         Serial.printf("✅ HTTP Response: %d (in %lu ms)\n", httpResponseCode, responseTime);
         Serial.print("📥 Response body: ");
         Serial.println(response);
-        
         // Parse Powersoft API response for debugging
         if (response.length() > 0) {
             JsonDocument respDoc;
@@ -312,6 +379,65 @@ void sendVolumeToZone(uint16_t vpAddress, int volume) {
     }
     http.end();
     Serial.println("🔚 HTTP connection closed\n");
+}
+
+// Function to discover available API endpoints on Mezzo device
+void discoverMezzoEndpoints() {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("⚠️  WiFi not connected, cannot discover endpoints");
+        return;
+    }
+    
+    Serial.println("🔍 Discovering Mezzo 604A API endpoints...");
+    
+    // Common endpoints to try
+    String testEndpoints[] = {
+        "/api/",
+        "/api/zones",
+        "/api/info",
+        "/api/status",
+        "/zones",
+        "/iv/views/web/730665316",
+        "/webapp/views/730665316",
+        "/help",
+        "/",
+        ""
+    };
+    
+    int numEndpoints = sizeof(testEndpoints) / sizeof(testEndpoints[0]);
+    
+    HTTPClient http;
+    
+    for (int i = 0; i < numEndpoints; i++) {
+        String url = "http://" + String(mezzoIP) + testEndpoints[i];
+        Serial.print("📡 Testing: ");
+        Serial.println(url);
+        
+        http.begin(url);
+        http.setTimeout(3000);
+        
+        int httpResponseCode = http.GET();
+        
+        if (httpResponseCode > 0) {
+            Serial.printf("✅ Response: %d - ", httpResponseCode);
+            String contentType = http.header("Content-Type");
+            int contentLength = http.getSize();
+            Serial.printf("Content-Type: %s, Size: %d bytes\n", contentType.c_str(), contentLength);
+            
+            if (httpResponseCode == 200 && contentLength > 0 && contentLength < 2048) {
+                String response = http.getString();
+                Serial.println("📄 Response preview:");
+                Serial.println(response.substring(0, 200) + (response.length() > 200 ? "..." : ""));
+            }
+        } else {
+            Serial.printf("❌ Error: %d\n", httpResponseCode);
+        }
+        
+        http.end();
+        delay(500); // Small delay between requests
+    }
+    
+    Serial.println("🔍 Endpoint discovery complete\n");
 }
 
 // Function to process complete DMT frame
