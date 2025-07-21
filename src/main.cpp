@@ -48,6 +48,9 @@ void connectToWiFi();
 void sendVolumeToMezzo(int volume);
 void sendVolumeToZone(uint16_t vpAddress, int volume);
 void discoverMezzoEndpoints();
+float readGainFromZone(uint16_t vpAddress);
+void writeVPToDMT(uint16_t vpAddress, uint16_t vpData);
+uint16_t mapGainToVP(float gain);
 int mapVPToVolume(uint16_t vpData);
 void processDMTFrame(uint8_t* frame, int frameLength);
 void handleDMTData();
@@ -146,6 +149,137 @@ void connectToWiFi() {
   }
   
   Serial.println("✗ Failed to connect to any WiFi network!");
+}
+
+// Function to map gain (0.0-1.0) to VP data (0x100-0x164)
+uint16_t mapGainToVP(float gain) {
+  if (gain <= 0.0f) return VP_MIN_VALUE;
+  if (gain >= 1.0f) return VP_MAX_VALUE;
+  
+  // Linear mapping from gain (0.0-1.0) to VP range (0x100-0x164)
+  return (uint16_t)(VP_MIN_VALUE + (gain * (VP_MAX_VALUE - VP_MIN_VALUE)));
+}
+
+// Function to write data to DMT VP address
+void writeVPToDMT(uint16_t vpAddress, uint16_t vpData) {
+  Serial.printf("📝 Writing VP 0x%04X = 0x%04X (%d) to DMT\n", vpAddress, vpData, vpData);
+  
+  // DMT Write VP command: 5A A5 05 82 [VP_High] [VP_Low] [Data_High] [Data_Low]
+  uint8_t writeVPCommand[] = {
+    0x5A, 0xA5,                    // Header
+    0x05,                          // Length
+    0x82,                          // Write VP command
+    (uint8_t)(vpAddress >> 8),     // VP address high byte
+    (uint8_t)(vpAddress & 0xFF),   // VP address low byte
+    (uint8_t)(vpData >> 8),        // Data high byte
+    (uint8_t)(vpData & 0xFF)       // Data low byte
+  };
+  
+  DMTSerial.write(writeVPCommand, sizeof(writeVPCommand));
+  
+  Serial.print("📤 DMT Write Command: ");
+  for (int i = 0; i < sizeof(writeVPCommand); i++) {
+    Serial.printf("%02X ", writeVPCommand[i]);
+  }
+  Serial.println();
+}
+
+// Function to read current gain from Mezzo API for specific zone
+float readGainFromZone(uint16_t vpAddress) {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("⚠️  WiFi not connected, cannot read gain");
+        return 0.0f;
+    }
+    
+    // Use same zone mapping as sendVolumeToZone
+    struct ZoneInfo {
+        uint16_t vpAddr;
+        uint32_t zoneId;
+        int zoneNumber;
+        const char* name;
+    };
+    const ZoneInfo zones[] = {
+        {0x1100, 1868704443, 5, "Zone 1"},
+        {0x1200, 4127125796, 6, "Zone 2"},
+        {0x1300, 2170320302, 7, "Zone 3"},
+        {0x1400, 2525320065, 8, "Zone 4"}
+    };
+    const int numZones = sizeof(zones) / sizeof(zones[0]);
+    
+    int zoneIdx = -1;
+    for (int i = 0; i < numZones; i++) {
+        if (zones[i].vpAddr == vpAddress) {
+            zoneIdx = i;
+            break;
+        }
+    }
+    
+    if (zoneIdx == -1) {
+        Serial.printf("❌ Unknown VP address for gain reading: 0x%04X\n", vpAddress);
+        return 0.0f;
+    }
+    
+    Serial.printf("📖 Reading current gain from %s (zoneNumber: %d)\n", zones[zoneIdx].name, zones[zoneIdx].zoneNumber);
+    
+    HTTPClient http;
+    String url = String("http://") + mezzoIP + "/iv/views/web/730665316/zone-controls/" + String(zones[zoneIdx].zoneNumber);
+    
+    Serial.print("📡 GET Request to: ");
+    Serial.println(url);
+    
+    http.begin(url);
+    http.addHeader("Accept", "application/json, text/plain, */*");
+    http.addHeader("Installation-Client-Id", "0add066f-0458-4a61-9f57-c3a82fbb63f9");
+    http.addHeader("Origin", String("http://") + mezzoIP);
+    http.addHeader("Referer", String("http://") + mezzoIP + "/webapp/views/730665316");
+    http.setTimeout(5000);
+    
+    unsigned long startTime = millis();
+    int httpResponseCode = http.GET();
+    unsigned long responseTime = millis() - startTime;
+    
+    float currentGain = 0.0f;
+    
+    if (httpResponseCode == 200) {
+        String response = http.getString();
+        Serial.printf("✅ HTTP GET Response: %d (in %lu ms)\n", httpResponseCode, responseTime);
+        Serial.print("📥 Response body: ");
+        Serial.println(response);
+        
+        // Parse JSON response to extract current gain
+        JsonDocument respDoc;
+        DeserializationError err = deserializeJson(respDoc, response);
+        if (!err) {
+            Serial.println("🔍 DEBUG: Parsing gain from response:");
+            
+            if (respDoc["Code"].is<int>() && respDoc["Code"].as<int>() == 0) {
+                // Look for gain in Result.Gain.Value
+                if (respDoc["Result"]["Gain"]["Value"].is<float>()) {
+                    currentGain = respDoc["Result"]["Gain"]["Value"].as<float>();
+                    Serial.printf("   Found Result.Gain.Value: %.5f\n", currentGain);
+                }
+                // Alternative: look for gain in Result.Zones[0].Gain
+                else if (respDoc["Result"]["Zones"].is<JsonArray>()) {
+                    JsonArray resultZones = respDoc["Result"]["Zones"].as<JsonArray>();
+                    if (resultZones.size() > 0 && resultZones[0]["Gain"].is<float>()) {
+                        currentGain = resultZones[0]["Gain"].as<float>();
+                        Serial.printf("   Found Result.Zones[0].Gain: %.5f\n", currentGain);
+                    }
+                }
+            }
+            
+            if (currentGain == 0.0f) {
+                Serial.println("⚠️  Could not extract gain value from response");
+            }
+        } else {
+            Serial.println("🔍 DEBUG: Failed to parse JSON response for gain reading");
+        }
+    } else {
+        Serial.printf("❌ HTTP GET Error: %d (after %lu ms)\n", httpResponseCode, responseTime);
+    }
+    
+    http.end();
+    return currentGain;
 }
 
 // Function to map VP data to volume percentage
@@ -480,9 +614,17 @@ void processDMTFrame(uint8_t* frame, int frameLength) {
         
         // Send volume to specific zone
         sendVolumeToZone(vpAddress, volume);
+        
+        // After sending volume, read back the actual gain and update DMT display
+        delay(1000); // Wait for Mezzo to process the command
+        float actualGain = readGainFromZone(vpAddress);
+        if (actualGain > 0.0f) {
+          uint16_t actualVPData = mapGainToVP(actualGain);
+          Serial.printf("📊 Actual gain from Mezzo: %.5f → VP: 0x%04X\n", actualGain, actualVPData);
+          writeVPToDMT(vpAddress, actualVPData);
+        }
       }
       break;
-      
     case DMT_CMD_READ_RTC: // 0x81 - RTC data
       Serial.print(", RTC Data: ");
       for (int i = 4; i < frameLength; i++) {
@@ -601,6 +743,26 @@ void loop() {
     Serial.printf("💓 System Heartbeat - Uptime: %lu seconds, Free Heap: %d bytes\n", 
                   millis() / 1000, ESP.getFreeHeap());
     lastHeartbeat = millis();
+  }
+  
+  // Periodically read current gain from Mezzo and update DMT display every 10 seconds
+  static unsigned long lastGainUpdate = 0;
+  if (millis() - lastGainUpdate > 10000) {
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("🔄 Periodic gain update from Mezzo to DMT...");
+      
+      // Read and update all zones
+      uint16_t vpAddresses[] = {0x1100, 0x1200, 0x1300, 0x1400};
+      for (int i = 0; i < 4; i++) {
+        float currentGain = readGainFromZone(vpAddresses[i]);
+        if (currentGain > 0.0f) {
+          uint16_t vpData = mapGainToVP(currentGain);
+          writeVPToDMT(vpAddresses[i], vpData);
+          delay(100); // Small delay between VP writes
+        }
+      }
+    }
+    lastGainUpdate = millis();
   }
   
   // Optional: Send command to read VP address 0x1000 every 30 seconds for testing
