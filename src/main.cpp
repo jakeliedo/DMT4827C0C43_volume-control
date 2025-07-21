@@ -46,6 +46,7 @@ bool frameStarted = false;
 // Forward declarations
 void connectToWiFi();
 void sendVolumeToMezzo(int volume);
+void sendVolumeToZone(uint16_t vpAddress, int volume);
 int mapVPToVolume(uint16_t vpData);
 void processDMTFrame(uint8_t* frame, int frameLength);
 void handleDMTData();
@@ -195,6 +196,124 @@ void sendVolumeToMezzo(int volume) {
   Serial.println("🔚 HTTP connection closed\n");
 }
 
+// Function to send volume to specific zone
+void sendVolumeToZone(uint16_t vpAddress, int volume) {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("⚠️  WiFi not connected, cannot send volume");
+        return;
+    }
+    // Mapping VP address to ZoneId and zoneNumber
+    struct ZoneInfo {
+        uint16_t vpAddr;
+        uint32_t zoneId;
+        int zoneNumber;
+        const char* name;
+    };
+    const ZoneInfo zones[] = {
+        {0x1100, 1868704442, 1, "Zone 1"}, //Vp đúng zone -1
+        {0x1200, 4127125795, 2, "Zone 2"}, //VP đúng zone -1
+        {0x1300, 2170320301, 3, "Zone 3"}, //VP đúng zone -1
+        {0x1400, 2525320065, 4, "Zone 4"}  //đúng VP đúng zone
+    };
+    const int numZones = sizeof(zones) / sizeof(zones[0]);
+    int zoneIdx = -1;
+    for (int i = 0; i < numZones; i++) {
+        if (zones[i].vpAddr == vpAddress) {
+            zoneIdx = i;
+            break;
+        }
+    }
+    if (zoneIdx == -1) {
+        Serial.printf("❌ Unknown VP address: 0x%04X\n", vpAddress);
+        Serial.println("🔍 DEBUG: Known VP addresses:");
+        for (int i = 0; i < numZones; i++) {
+            Serial.printf("   0x%04X → %s (ZoneId: %u)\n", zones[i].vpAddr, zones[i].name, zones[i].zoneId);
+        }
+        return;
+    }
+    // Convert volume (0-100) to gain using exponential mapping
+    // Based on sample data: 80%→0.25119, 82%→0.2884, 84%→0.33113, 86%→0.38019
+    float gain = 0.0f;
+    if (volume <= 0) {
+        gain = 0.0f;
+    } else if (volume >= 100) {
+        gain = 1.0f;  // Maximum gain
+    } else {
+        // Exponential mapping: gain = a * exp(b * volume) + c
+        // Approximate formula based on data points
+        gain = 0.01f * exp(0.045f * volume);
+        if (gain > 1.0f) gain = 1.0f;  // Cap at 1.0
+    }
+    
+    Serial.println("🔍 DEBUG: Zone and Gain calculation:");
+    Serial.printf("   VP Address: 0x%04X → %s\n", vpAddress, zones[zoneIdx].name);
+    Serial.printf("   Volume: %d%% → Gain: %.5f\n", volume, gain);
+    Serial.printf("   Zone ID: %u, Zone Number: %d\n", zones[zoneIdx].zoneId, zones[zoneIdx].zoneNumber);
+    
+    Serial.printf("🔊 Sending volume %d%% (Gain: %.5f) to %s (ZoneId: %u, zoneNumber: %d)\n", volume, gain, zones[zoneIdx].name, zones[zoneIdx].zoneId, zones[zoneIdx].zoneNumber);
+    HTTPClient http;
+    String url = String("http://") + mezzoIP + "/iv/views/web/730665316/zone-controls/" + String(zones[zoneIdx].zoneNumber);
+    Serial.print("📡 Connecting to: ");
+    Serial.println(url);
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Installation-Client-Id", "ca399b24-ed68-479a-9548-743314c25783");
+    http.addHeader("Origin", String("http://") + mezzoIP);
+    http.addHeader("Referer", String("http://") + mezzoIP + "/webapp/views/730665316");
+    http.setTimeout(5000);
+    // Build JSON payload
+    JsonDocument doc;
+    JsonArray zonesArr = doc["Zones"].to<JsonArray>();
+    JsonObject zoneObj = zonesArr.add<JsonObject>();
+    zoneObj["Id"] = zones[zoneIdx].zoneId;
+    zoneObj["Gain"] = gain;
+    String jsonString;
+    serializeJson(doc, jsonString);
+    Serial.print("📤 Sending JSON: ");
+    Serial.println(jsonString);
+    Serial.println("🔍 DEBUG: HTTP Headers:");
+    Serial.println("   Content-Type: application/json");
+    Serial.println("   Installation-Client-Id: ca399b24-ed68-479a-9548-743314c25783");
+    Serial.printf("   Origin: http://%s\n", mezzoIP);
+    Serial.printf("   Referer: http://%s/webapp/views/730665316\n", mezzoIP);
+    
+    unsigned long startTime = millis();
+    int httpResponseCode = http.PUT(jsonString);
+    unsigned long responseTime = millis() - startTime;
+    if (httpResponseCode > 0) {
+        String response = http.getString();
+        Serial.printf("✅ HTTP Response: %d (in %lu ms)\n", httpResponseCode, responseTime);
+        Serial.print("📥 Response body: ");
+        Serial.println(response);
+        
+        // Parse Powersoft API response for debugging
+        if (response.length() > 0) {
+            JsonDocument respDoc;
+            DeserializationError err = deserializeJson(respDoc, response);
+            if (!err) {
+                Serial.println("🔍 DEBUG: Parsed response:");
+                if (respDoc["Code"].is<int>()) {
+                    int code = respDoc["Code"].as<int>();
+                    Serial.printf("   Code: %d (%s)\n", code, 
+                        code == 0 ? "OK" : 
+                        code == 1 ? "DOWN" : 
+                        code == 2 ? "DIFFERENT CONFIGURATION" : "UNKNOWN");
+                }
+                if (respDoc["Message"].is<const char*>()) {
+                    Serial.printf("   Message: %s\n", respDoc["Message"].as<const char*>());
+                }
+            } else {
+                Serial.println("🔍 DEBUG: Failed to parse JSON response");
+            }
+        }
+    } else {
+        Serial.printf("❌ HTTP Error: %d (after %lu ms)\n", httpResponseCode, responseTime);
+        Serial.println("   Possible causes: Network timeout, Mezzo device offline, wrong IP/port");
+    }
+    http.end();
+    Serial.println("🔚 HTTP connection closed\n");
+}
+
 // Function to process complete DMT frame
 void processDMTFrame(uint8_t* frame, int frameLength) {
   if (frameLength < 4) return; // Minimum frame size: header(2) + length(1) + command(1)
@@ -225,9 +344,16 @@ void processDMTFrame(uint8_t* frame, int frameLength) {
         Serial.print(" ➜ Volume: ");
         Serial.print(volume);
         Serial.print("%");
+        Serial.println();
         
-        // Send volume to Mezzo 604A
-        sendVolumeToMezzo(volume);
+        // Debug: Show mapping details
+        Serial.println("🔍 DEBUG: VP to Volume mapping:");
+        Serial.printf("   VP Raw: 0x%04X (%d decimal)\n", vpData, vpData);
+        Serial.printf("   VP Range: 0x%03X-0x%03X (%d-%d)\n", VP_MIN_VALUE, VP_MAX_VALUE, VP_MIN_VALUE, VP_MAX_VALUE);
+        Serial.printf("   Mapped Volume: %d%%\n", volume);
+        
+        // Send volume to specific zone
+        sendVolumeToZone(vpAddress, volume);
       }
       break;
       
