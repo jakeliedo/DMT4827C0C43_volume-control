@@ -51,6 +51,7 @@ void discoverMezzoEndpoints();
 float readGainFromZone(uint16_t vpAddress);
 void writeVPToDMT(uint16_t vpAddress, uint16_t vpData);
 uint16_t mapGainToVP(float gain);
+uint8_t calculateHighByteFromGain(float gain);
 int mapVPToVolume(uint16_t vpData);
 void processDMTFrame(uint8_t* frame, int frameLength);
 void handleDMTData();
@@ -151,13 +152,44 @@ void connectToWiFi() {
   Serial.println("✗ Failed to connect to any WiFi network!");
 }
 
-// Function to map gain (0.0-1.0) to VP data (0x100-0x164)
+// Function to map gain (0.0-1.0) to VP data (high byte calculation for volume display)
 uint16_t mapGainToVP(float gain) {
-  if (gain <= 0.0f) return VP_MIN_VALUE;
-  if (gain >= 1.0f) return VP_MAX_VALUE;
+  if (gain <= 0.0f) return 0x0000;  // Minimum VP value for 0 gain
+  if (gain >= 1.0f) return 0x6400;  // Maximum VP value for gain = 1.0 (100 on display)
   
-  // Linear mapping from gain (0.0-1.0) to VP range (0x100-0x164)
-  return (uint16_t)(VP_MIN_VALUE + (gain * (VP_MAX_VALUE - VP_MIN_VALUE)));
+  // Reverse calculation: find volume level from gain
+  // gain = (2^(volume/10))/1000, so volume = 10 * log2(gain * 1000)
+  float volume = 10.0f * log2f(gain * 1000.0f);
+  if (volume < 0.0f) volume = 0.0f;
+  if (volume > 100.0f) volume = 100.0f;
+  
+  // Convert volume to VP high byte (0-100 volume maps to 0x00-0x64 high byte)
+  uint8_t highByte = (uint8_t)volume;
+  uint16_t vpData = (highByte << 8) | 0x00;  // Low byte is always 0x00
+  
+  // Debug log for gain to VP conversion
+  Serial.printf("🔍 DEBUG: Gain to VP conversion: %.5f → Volume: %.1f → VP: 0x%04X (High: 0x%02X)\n", 
+                gain, volume, vpData, highByte);
+  
+  return vpData;
+}
+
+// Function to calculate high byte value from gain using reverse formula
+uint8_t calculateHighByteFromGain(float gain) {
+  if (gain <= 0.0f) return 0x00;
+  if (gain >= 1.0f) return 0x64;  // 100 decimal = 0x64
+  
+  // Reverse formula: gain = (2^(volume/10))/1000
+  // So: volume = 10 * log2(gain * 1000)
+  float volume = 10.0f * log2f(gain * 1000.0f);
+  if (volume < 0.0f) volume = 0.0f;
+  if (volume > 100.0f) volume = 100.0f;
+  
+  uint8_t highByte = (uint8_t)round(volume);
+  Serial.printf("🔢 Gain %.5f → Volume %.1f → High Byte 0x%02X (%d decimal)\n", 
+                gain, volume, highByte, highByte);
+  
+  return highByte;
 }
 
 // Function to write data to DMT VP address
@@ -282,12 +314,17 @@ float readGainFromZone(uint16_t vpAddress) {
     return currentGain;
 }
 
-// Function to map VP data to volume percentage
+// Function to map VP data to volume percentage (high byte represents volume 0-100)
 int mapVPToVolume(uint16_t vpData) {
-  if (vpData < VP_MIN_VALUE) return VOLUME_MIN;
-  if (vpData > VP_MAX_VALUE) return VOLUME_MAX;
+  // Extract high byte as volume level (0-100)
+  uint8_t highByte = (vpData >> 8) & 0xFF;
+  int volume = (int)highByte;
   
-  return map(vpData, VP_MIN_VALUE, VP_MAX_VALUE, VOLUME_MIN, VOLUME_MAX);
+  // Clamp to valid range
+  if (volume < VOLUME_MIN) volume = VOLUME_MIN;
+  if (volume > VOLUME_MAX) volume = VOLUME_MAX;
+  
+  return volume;
 }
 
 // Function to send volume to Mezzo 604A
@@ -372,17 +409,16 @@ void sendVolumeToZone(uint16_t vpAddress, int volume) {
         }
         return;
     }
-    // Convert volume (0-100) to gain using exponential mapping
-    // Based on sample data: 80%→0.25119, 82%→0.2884, 84%→0.33113, 86%→0.38019
+    // Convert volume (0-100) to gain using exponential formula
+    // GAIN = (2^(x/10))/1000 where x is volume level (0-100)
     float gain = 0.0f;
     if (volume <= 0) {
         gain = 0.0f;
     } else if (volume >= 100) {
         gain = 1.0f;  // Maximum gain
     } else {
-        // Exponential mapping: gain = a * exp(b * volume) + c
-        // Approximate formula based on data points
-        gain = 0.01f * exp(0.045f * volume);
+        // Exponential mapping: GAIN = (2^(volume/10))/1000
+        gain = pow(2.0f, (float)volume / 10.0f) / 1000.0f;
         if (gain > 1.0f) gain = 1.0f;  // Cap at 1.0
     }
     
@@ -394,24 +430,19 @@ void sendVolumeToZone(uint16_t vpAddress, int volume) {
     Serial.printf("🔊 Sending volume %d%% (Gain: %.5f) to %s (ZoneId: %u, zoneNumber: %d)\n", volume, gain, zones[zoneIdx].name, zones[zoneIdx].zoneId, zones[zoneIdx].zoneNumber);
     HTTPClient http;
     
-    // Chỉ sử dụng primary URL và Installation-Client-Id đúng
-    String url1 = String("http://") + mezzoIP + "/iv/views/web/730665316/zone-controls/" + String(zones[zoneIdx].zoneNumber);
-    String url2 = String("http://") + mezzoIP + "/api/zones/" + String(zones[zoneIdx].zoneId) + "/volume";
-    String url3 = String("http://") + mezzoIP + "/zones/" + String(zones[zoneIdx].zoneNumber) + "/gain";
+    // Primary URL works well based on endpoint discovery
+    String url = String("http://") + mezzoIP + "/iv/views/web/730665316/zone-controls/" + String(zones[zoneIdx].zoneNumber);
     
-    Serial.print("📡 Primary URL: ");
-    Serial.println(url1);
-    Serial.print("📡 Alternative URL 1: ");
-    Serial.println(url2);
-    Serial.print("📡 Alternative URL 2: ");
-    Serial.println(url3);
+    Serial.print("📡 PUT Request to: ");
+    Serial.println(url);
     
-    http.begin(url1);
+    http.begin(url);
     http.addHeader("Content-Type", "application/json");
     http.addHeader("Installation-Client-Id", "0add066f-0458-4a61-9f57-c3a82fbb63f9");
     http.addHeader("Origin", String("http://") + mezzoIP);
     http.addHeader("Referer", String("http://") + mezzoIP + "/webapp/views/730665316");
     http.setTimeout(5000);
+    
     // Build JSON payload
     JsonDocument doc;
     JsonArray zonesArr = doc["Zones"].to<JsonArray>();
@@ -420,6 +451,7 @@ void sendVolumeToZone(uint16_t vpAddress, int volume) {
     zoneObj["Gain"] = gain;
     String jsonString;
     serializeJson(doc, jsonString);
+    
     Serial.print("📤 Sending JSON: ");
     Serial.println(jsonString);
     Serial.println("🔍 DEBUG: HTTP Headers:");
@@ -427,61 +459,10 @@ void sendVolumeToZone(uint16_t vpAddress, int volume) {
     Serial.println("   Installation-Client-Id: 0add066f-0458-4a61-9f57-c3a82fbb63f9");
     Serial.printf("   Origin: http://%s\n", mezzoIP);
     Serial.printf("   Referer: http://%s/webapp/views/730665316\n", mezzoIP);
+    
     unsigned long startTime = millis();
     int httpResponseCode = http.PUT(jsonString);
     unsigned long responseTime = millis() - startTime;
-    
-    // If first attempt fails with 404, try alternative endpoints
-    if (httpResponseCode == 404) {
-        Serial.println("🔄 Primary endpoint returned 404, trying alternative endpoints...");
-        http.end();
-        
-        // Try alternative endpoint 1: Direct API
-        Serial.print("📡 Trying alternative URL: ");
-        Serial.println(url2);
-        
-        http.begin(url2);
-        http.addHeader("Content-Type", "application/json");
-        http.setTimeout(5000);
-        
-        // Create simpler JSON payload for direct API
-        JsonDocument doc2;
-        doc2["volume"] = volume;
-        doc2["gain"] = gain;
-        
-        String jsonString2;
-        serializeJson(doc2, jsonString2);
-        Serial.print("📤 Sending alternative JSON: ");
-        Serial.println(jsonString2);
-        
-        httpResponseCode = http.POST(jsonString2);
-        responseTime = millis() - startTime;
-        
-        if (httpResponseCode == 404) {
-            Serial.println("🔄 Alternative endpoint 1 also returned 404, trying endpoint 2...");
-            http.end();
-            
-            // Try alternative endpoint 2: Simple zones endpoint
-            Serial.print("📡 Trying second alternative URL: ");
-            Serial.println(url3);
-            
-            http.begin(url3);
-            http.addHeader("Content-Type", "application/json");
-            http.setTimeout(5000);
-            
-            // Create even simpler JSON payload
-            JsonDocument doc3;
-            doc3["gain"] = gain;
-            
-            String jsonString3;
-            serializeJson(doc3, jsonString3);
-            Serial.print("📤 Sending simple JSON: ");
-            Serial.println(jsonString3);
-            
-            httpResponseCode = http.PUT(jsonString3);
-            responseTime = millis() - startTime;
-        }
-    }
     if (httpResponseCode > 0) {
         String response = http.getString();
         Serial.printf("✅ HTTP Response: %d (in %lu ms)\n", httpResponseCode, responseTime);
@@ -524,18 +505,15 @@ void discoverMezzoEndpoints() {
     
     Serial.println("🔍 Discovering Mezzo 604A API endpoints...");
     
-    // Common endpoints to try
+    // Only test endpoints that actually work based on previous discovery
     String testEndpoints[] = {
-        "/api/",
-        "/api/zones",
-        "/api/info",
-        "/api/status",
-        "/zones",
-        "/iv/views/web/730665316",
-        "/webapp/views/730665316",
-        "/help",
-        "/",
-        ""
+        "/iv/views/web/730665316",       // Works - 200 OK (2959 bytes)
+        "/webapp/views/730665316",       // Works - 200 OK (8145 bytes)
+        "/",                             // Works - 200 OK (8145 bytes)
+        "/iv/views/web/730665316/zone-controls/5",  // Test zone control endpoint
+        "/iv/views/web/730665316/zone-controls/6",
+        "/iv/views/web/730665316/zone-controls/7", 
+        "/iv/views/web/730665316/zone-controls/8"
     };
     
     int numEndpoints = sizeof(testEndpoints) / sizeof(testEndpoints[0]);
@@ -548,6 +526,13 @@ void discoverMezzoEndpoints() {
         Serial.println(url);
         
         http.begin(url);
+        // Add headers for zone control endpoints
+        if (i >= 3) { // Zone control endpoints
+            http.addHeader("Accept", "application/json, text/plain, */*");
+            http.addHeader("Installation-Client-Id", "0add066f-0458-4a61-9f57-c3a82fbb63f9");
+            http.addHeader("Origin", String("http://") + mezzoIP);
+            http.addHeader("Referer", String("http://") + mezzoIP + "/webapp/views/730665316");
+        }
         http.setTimeout(3000);
         
         int httpResponseCode = http.GET();
@@ -558,10 +543,11 @@ void discoverMezzoEndpoints() {
             int contentLength = http.getSize();
             Serial.printf("Content-Type: %s, Size: %d bytes\n", contentType.c_str(), contentLength);
             
-            if (httpResponseCode == 200 && contentLength > 0 && contentLength < 2048) {
+            if (httpResponseCode == 200 && contentLength > 0 && contentLength < 1024) {
                 String response = http.getString();
                 Serial.println("📄 Response preview:");
-                Serial.println(response.substring(0, 200) + (response.length() > 200 ? "..." : ""));
+                Serial.println(response.substring(0, 150) + (response.length() > 150 ? "..." : ""));
+                Serial.println();
             }
         } else {
             Serial.printf("❌ Error: %d\n", httpResponseCode);
