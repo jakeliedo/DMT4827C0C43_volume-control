@@ -94,85 +94,73 @@ void setup() {
   Serial.println("=== System Ready ===\n");
 }
 
-// Function to connect to WiFi networks in priority order
+// Function to connect to Vinternal WiFi only once
 void connectToWiFi() {
   Serial.println("\n>>> Starting WiFi connection process...");
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   delay(1000);
+
+  const char* ssid = "Vinternal";
+  const char* password = "abcd123456";
   
-  Serial.println("Scanning for available WiFi networks...");
-  int n = WiFi.scanNetworks();
-  Serial.printf("Found %d networks:\n", n);
-  for (int i = 0; i < n; ++i) {
-    Serial.printf("  %d: %s (%d dBm) %s\n", i + 1, WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "Open" : "Secured");
-  }
-  Serial.println();
+  Serial.print(">>> Attempting to connect to: ");
+  Serial.println(ssid);
   
-  for (int i = 0; i < numWifiNetworks; i++) {
-    Serial.print(">>> Attempting to connect to: ");
-    Serial.print(wifiNetworks[i][0]);
-    Serial.print(" (Priority ");
-    Serial.print(i + 1);
-    Serial.println(")");
+  WiFi.begin(ssid, password);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
     
-    WiFi.begin(wifiNetworks[i][0], wifiNetworks[i][1]);
-    
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-      delay(500);
-      Serial.print(".");
-      attempts++;
-      
-      if (attempts % 10 == 0) {
-        Serial.printf(" [%d/20] ", attempts);
-      }
-    }
-    
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\n✓ WiFi Connected Successfully!");
-      Serial.print("  Network: ");
-      Serial.println(wifiNetworks[i][0]);
-      Serial.print("  IP Address: ");
-      Serial.println(WiFi.localIP());
-      Serial.print("  Signal Strength: ");
-      Serial.print(WiFi.RSSI());
-      Serial.println(" dBm");
-      Serial.print("  MAC Address: ");
-      Serial.println(WiFi.macAddress());
-      return;
-    } else {
-      Serial.println("\n✗ Connection failed");
-      Serial.print("  WiFi Status: ");
-      Serial.println(WiFi.status());
-      WiFi.disconnect();
-      delay(1000);
+    if (attempts % 10 == 0) {
+      Serial.printf(" [%d/20] ", attempts);
     }
   }
   
-  Serial.println("✗ Failed to connect to any WiFi network!");
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n✓ WiFi Connected Successfully!");
+    Serial.print("  Network: ");
+    Serial.println(ssid);
+    Serial.print("  IP Address: ");
+    Serial.println(WiFi.localIP());
+    Serial.print("  Signal Strength: ");
+    Serial.print(WiFi.RSSI());
+    Serial.println(" dBm");
+    Serial.print("  MAC Address: ");
+    Serial.println(WiFi.macAddress());
+  } else {
+    Serial.println("\n✗ WiFi Connection failed!");
+    Serial.println("⚠️ Hard reset device to retry connection");
+    Serial.print("  WiFi Status: ");
+    Serial.println(WiFi.status());
+  }
 }
 
-// Function to map gain (0.0-1.0) to VP data (reverse mapping using corrected formula)
+// Function to map gain (0.0-1.0) to VP data (high byte = volume_converted, low byte = 0x00)
 uint16_t mapGainToVP(float gain) {
-  if (gain <= 0.0f) return VP_MIN_VALUE;  // 0x100 = 256
-  if (gain >= 1.0f) return VP_MAX_VALUE;  // 0x164 = 356
+  if (gain <= 0.0f) return 0x0000;  // Volume 0 → VP data 0x0000
+  if (gain >= 1.0f) return 0x6400;  // Volume 100 → VP data 0x6400
   
-  // Reverse calculation from GAIN = (2^(vpData*10/356))/1000
-  // So: gain * 1000 = 2^(vpData*10/356)
-  // log2(gain * 1000) = vpData*10/356
-  // vpData = (log2(gain * 1000) * 356) / 10
-  float vpDataFloat = (log2f(gain * 1000.0f) * 356.0f) / 10.0f;
+  // Reverse calculation: find volume_converted from gain
+  // GAIN = (2^(dec_volume/10))/1000, so dec_volume = 10 * log2(gain * 1000)
+  float volume_converted = 10.0f * log2f(gain * 1000.0f);
+  if (volume_converted < 0.0f) volume_converted = 0.0f;
+  if (volume_converted > 100.0f) volume_converted = 100.0f;
   
-  uint16_t vpData = (uint16_t)round(vpDataFloat);
-  if (vpData < VP_MIN_VALUE) vpData = VP_MIN_VALUE;
-  if (vpData > VP_MAX_VALUE) vpData = VP_MAX_VALUE;
+  // Create VP data: high byte = volume_converted (0-100), low byte = 0x00
+  uint8_t volumeByte = (uint8_t)round(volume_converted);
+  uint16_t vpData = (volumeByte << 8) | 0x00;  // Format: 0xVV00 where VV is volume_converted
   
   // Debug log for gain to VP conversion
-  Serial.printf("🔍 DEBUG: Gain to VP conversion: %.5f → VP: 0x%04X (%d)\n", 
-                gain, vpData, vpData);
-  Serial.printf("   Reverse formula: vpData = (log2(%.5f * 1000) * 356) / 10 = %.2f → %d\n", 
-                gain, vpDataFloat, vpData);
+  Serial.printf("🔍 DEBUG: Gain to VP conversion: %.5f → Volume_converted: %.1f → VP: 0x%04X (High: %d, Low: 0)\n", 
+                gain, volume_converted, vpData, volumeByte);
+  Serial.printf("   Reverse formula: volume_converted = 10 * log2(%.5f * 1000) = %.1f\n", 
+                gain, volume_converted);
+  Serial.printf("   VP data format: High byte 0x%02X (%d) + Low byte 0x00 = 0x%04X\n", 
+                volumeByte, volumeByte, vpData);
   
   return vpData;
 }
@@ -512,7 +500,7 @@ void sendVolumeToZone(uint16_t vpAddress, int volume) {
     Serial.println("🔚 HTTP connection closed\n");
 }
 
-// Function to send VP data directly to specific zone (corrected formula)
+// Function to send VP data directly to specific zone (corrected formula using low byte)
 void sendVolumeToZoneWithVPData(uint16_t vpAddress, uint16_t vpData) {
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("⚠️  WiFi not connected, cannot send volume");
@@ -548,40 +536,40 @@ void sendVolumeToZoneWithVPData(uint16_t vpAddress, uint16_t vpData) {
         return;
     }
     
-    // Convert VP data directly to gain using corrected formula
-    // GAIN = (2^(vpData*10/356))/1000 where vpData is the raw VP value
+    // Extract low byte (hex_volume) from VP data - this is what displays on DMT screen
+    uint8_t hex_volume = vpData & 0x00FF;  // Extract low byte
+    uint8_t dec_volume = hex_volume;        // Convert hex to decimal (0-100 range)
+    
+    // Convert dec_volume to gain using corrected formula
+    // GAIN = (2^(dec_volume/10))/1000
     float gain = 0.0f;
-    if (vpData <= VP_MIN_VALUE) {
+    if (dec_volume <= 0) {
         gain = 0.0f;
-    } else if (vpData >= VP_MAX_VALUE) {
+    } else if (dec_volume >= 100) {
         gain = 1.0f;  // Maximum gain
     } else {
-        // Corrected exponential formula: GAIN = (2^(vpData*10/356))/1000
-        float exponent = ((float)vpData * 10.0f) / 356.0f;
+        // Corrected formula: GAIN = (2^(dec_volume/10))/1000
+        float exponent = (float)dec_volume / 10.0f;
         gain = pow(2.0f, exponent) / 1000.0f;
         if (gain > 1.0f) gain = 1.0f;  // Cap at 1.0
     }
     
-    // Calculate percentage for display
-    float percentage = ((float)vpData / 356.0f) * 100.0f;
-    int displayVolume = mapVPToVolume(vpData);  // For display only
-    
     // Debug: Show gain calculation details
-    Serial.println("🔍 DEBUG: VP Data to Gain calculation (CORRECTED FORMULA):");
+    Serial.println("🔍 DEBUG: VP Data to Gain calculation (CORRECTED FORMULA - LOW BYTE):");
     Serial.printf("   Input VP Data: 0x%04X (%d decimal)\n", vpData, vpData);
-    Serial.printf("   VP Percentage: %.3f%% (%d/356)\n", percentage, vpData);
-    Serial.printf("   Display Volume: %d%% (mapped for display)\n", displayVolume);
-    Serial.printf("   Formula: GAIN = (2^(%d*10/356))/1000 = (2^%.3f)/1000\n", vpData, ((float)vpData * 10.0f) / 356.0f);
-    Serial.printf("   Power of 2: 2^%.3f = %.6f\n", ((float)vpData * 10.0f) / 356.0f, pow(2.0f, ((float)vpData * 10.0f) / 356.0f));
+    Serial.printf("   Low Byte (hex_volume): 0x%02X (%d decimal)\n", hex_volume, hex_volume);
+    Serial.printf("   Dec Volume: %d (0-100 range)\n", dec_volume);
+    Serial.printf("   Formula: GAIN = (2^(%d/10))/1000 = (2^%.1f)/1000\n", dec_volume, (float)dec_volume/10.0f);
+    Serial.printf("   Power of 2: 2^%.1f = %.6f\n", (float)dec_volume/10.0f, pow(2.0f, (float)dec_volume/10.0f));
     Serial.printf("   Calculated GAIN: %.6f\n", gain);
     
     Serial.println("🔍 DEBUG: Zone mapping:");
     Serial.printf("   VP Address: 0x%04X → %s\n", vpAddress, zones[zoneIdx].name);
-    Serial.printf("   VP Data: %d → Gain: %.6f\n", vpData, gain);
+    Serial.printf("   Dec Volume: %d → Gain: %.6f\n", dec_volume, gain);
     Serial.printf("   Zone ID: %u, Zone Number: %d\n", zones[zoneIdx].zoneId, zones[zoneIdx].zoneNumber);
     
-    Serial.printf("🔊 Sending VP data %d (%.3f%%) as Gain: %.6f to %s (ZoneId: %u, zoneNumber: %d)\n", 
-                  vpData, percentage, gain, zones[zoneIdx].name, zones[zoneIdx].zoneId, zones[zoneIdx].zoneNumber);
+    Serial.printf("🔊 Sending Dec Volume %d as Gain: %.6f to %s (ZoneId: %u, zoneNumber: %d)\n", 
+                  dec_volume, gain, zones[zoneIdx].name, zones[zoneIdx].zoneId, zones[zoneIdx].zoneNumber);
     
     HTTPClient http;
     
@@ -737,17 +725,16 @@ void processDMTFrame(uint8_t* frame, int frameLength) {
         // Map VP data to volume for display and send raw VP data to Mezzo 604A
         int volume = mapVPToVolume(vpData);
         
-        // Debug: Show VP data breakdown
+
+        // Debug: Show VP data breakdown using low byte (dec_volume) for DMT display
         uint8_t highByte = (vpData >> 8) & 0xFF;
         uint8_t lowByte = vpData & 0xFF;
-        float rawPercentage = ((float)vpData / 356.0f) * 100.0f;  // Use 356 as max for percentage
-        
+        int dec_volume = lowByte;
+
         Serial.printf("🔍 DEBUG: VP Data Analysis:\n");
-        Serial.printf("   VP Raw: 0x%04X (%d decimal)\n", vpData, vpData);
-        Serial.printf("   VP Range: 0x%03X-0x%03X (%d-%d)\n", VP_MIN_VALUE, VP_MAX_VALUE, VP_MIN_VALUE, VP_MAX_VALUE);
-        Serial.printf("   VP High Byte = 0x%02X (%d), Low Byte = 0x%02X (%d)\n", highByte, highByte, lowByte, lowByte);
-        Serial.printf("   Raw Percentage: %.3f%% (%d/356)\n", rawPercentage, vpData);
-        Serial.printf("   Mapped Volume: %d%%\n", volume);
+        Serial.printf("   VP Raw: 0x%04X\n", vpData);
+        Serial.printf("   VP High Byte = 0x%02X, Low Byte = 0x%02X\n", highByte, lowByte);
+        Serial.printf("   DMT Display Value (dec_volume): %d\n", dec_volume);
         
         // Send VP data directly to zone (not the mapped volume)
         sendVolumeToZoneWithVPData(vpAddress, vpData);
