@@ -3,6 +3,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <HardwareSerial.h>
+#include "message.h" // Include message arrays for DMT display
 
 // Define pins for ESP32-C3 Super Mini
 #define LED_PIN 8           // Built-in LED
@@ -63,34 +64,47 @@ void setup() {
   delay(2000); // Give time for Serial to initialize
   
   Serial.println("\n=== ESP32-C3 DMT Remote Controller ===");
-  Serial.print("Chip Model: ");
-  Serial.println(ESP.getChipModel());
-  Serial.print("Chip Revision: ");
-  Serial.println(ESP.getChipRevision());
-  Serial.print("Flash Size: ");
-  Serial.println(ESP.getFlashChipSize());
-  Serial.print("Free Heap: ");
-  Serial.println(ESP.getFreeHeap());
+  // Serial.print("Chip Model: ");
+  // Serial.println(ESP.getChipModel());
+  // Serial.print("Chip Revision: ");
+  // Serial.println(ESP.getChipRevision());
+  // Serial.print("Flash Size: ");
+  // Serial.println(ESP.getFlashChipSize());
+  // Serial.print("Free Heap: ");
+  // Serial.println(ESP.getFreeHeap());
   
   // Initialize LED pin
   pinMode(LED_PIN, OUTPUT);
-  Serial.println("✓ LED pin initialized");
-  
+  //Serial.println("✓ LED pin initialized");
+
   // Initialize UART for DMT touchscreen communication
   DMTSerial.begin(115200, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
   Serial.println("✓ DMT UART initialized (115200 baud, pins TX:" + String(UART_TX_PIN) + " RX:" + String(UART_RX_PIN) + ")");
-  
+
   Serial.println("✓ Hardware initialization complete");
-  
+
+
+  // Chuyển màn hình sang trang khởi động (ID 06)
+  writeVPToDMT(0x0082, 0x0006); // VP chuyển trang sau khi bật nguồn
+  delay(100);
+
+  // Hiển thị các chuỗi khởi động từ thư viện message.h
+  DMTSerial.write(booting_msg, sizeof(booting_msg));
+  delay(100);
+  // Nếu cần, sử dụng connect_msg, connected_msg, not_connect_msg từ message.h
   // Connect to WiFi
   connectToWiFi();
-  
+  DMTSerial.write(connect_msg, sizeof(connect_msg));
+  delay(100);
+
   // Discover available API endpoints for debugging
   if (WiFi.status() == WL_CONNECTED) {
+    DMTSerial.write(connected_msg, sizeof(connected_msg));
+    delay(100);
     Serial.println("🔍 Running API endpoint discovery...");
     discoverMezzoEndpoints();
   }
-  
+
   Serial.println("=== System Ready ===\n");
 }
 
@@ -101,8 +115,8 @@ void connectToWiFi() {
   WiFi.disconnect();
   delay(1000);
 
-  const char* ssid = "Vinternal";
-  const char* password = "abcd123456";
+  const char* ssid = "Roll";
+  const char* password = "0908800130";
   
   Serial.print(">>> Attempting to connect to: ");
   Serial.println(ssid);
@@ -133,6 +147,8 @@ void connectToWiFi() {
     Serial.println(WiFi.macAddress());
   } else {
     Serial.println("\n✗ WiFi Connection failed!");
+    DMTSerial.write(not_connect_msg, sizeof(not_connect_msg));
+    delay(100);
     Serial.println("⚠️ Hard reset device to retry connection");
     Serial.print("  WiFi Status: ");
     Serial.println(WiFi.status());
