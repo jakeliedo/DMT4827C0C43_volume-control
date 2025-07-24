@@ -34,6 +34,7 @@ const int mezzoPort = 80;
 #define DMT_CMD_READ_VP 0x83
 #define DMT_CMD_READ_RTC 0x81
 #define DMT_CMD_WRITE_VP 0x82
+#define DMT_CMD_WRITE_REG 0x80  // DGUS1 Write Register command
 #define DMT_BUFFER_SIZE 64
 
 // Create a second serial port for DMT touchscreen communication
@@ -51,7 +52,14 @@ void sendVolumeToZone(uint16_t vpAddress, int volume);
 void sendVolumeToZoneWithVPData(uint16_t vpAddress, uint16_t vpData);
 void discoverMezzoEndpoints();
 float readGainFromZone(uint16_t vpAddress);
+// DGUS1 Register functions (1 byte data)
+void writeRegisterToDMT(uint8_t regAddress, uint8_t regData);
+uint8_t readRegisterFromDMT(uint8_t regAddress);
+
+// DGUS1 VP functions (2 byte data)  
 void writeVPToDMT(uint16_t vpAddress, uint16_t vpData);
+uint16_t readVPFromDMT(uint16_t vpAddress);
+
 uint16_t mapGainToVP(float gain);
 uint8_t calculateHighByteFromGain(float gain);
 int mapVPToVolume(uint16_t vpData);
@@ -83,37 +91,33 @@ void setup() {
 
   Serial.println("✓ Hardware initialization complete");
 
-
-  // Chuyển màn hình sang trang khởi động (ID 06)
-  writeVPToDMT(0x0082, 0x0006); // VP chuyển trang sau khi bật nguồn
-  delay(100);
-
-  // Hiển thị các chuỗi khởi động từ thư viện message.h
-  DMTSerial.write(booting_msg, sizeof(booting_msg));
-  delay(100);
-  // Nếu cần, sử dụng connect_msg, connected_msg, not_connect_msg từ message.h
-  // Connect to WiFi
+  // Bắt đầu kết nối WiFi (sẽ chuyển sang trang boot 06 tự động)
   connectToWiFi();
-  DMTSerial.write(connect_msg, sizeof(connect_msg));
-  delay(100);
-
-  // Discover available API endpoints for debugging
+  
+  // Sau khi WiFi kết nối xong, cập nhật volume ngay lập tức
   if (WiFi.status() == WL_CONNECTED) {
-    DMTSerial.write(connected_msg, sizeof(connected_msg));
-    delay(100);
-    Serial.println("🔍 Running API endpoint discovery...");
-    discoverMezzoEndpoints();
-    
-    // Update volume from Mezzo to DMT display immediately after WiFi connection
+    Serial.println("🔄 Initial volume update after WiFi connection...");
     uint16_t vpAddresses[] = {0x1100, 0x1200, 0x1300, 0x1400};
     for (int i = 0; i < 4; i++) {
       float currentGain = readGainFromZone(vpAddresses[i]);
       if (currentGain > 0.0f) {
         uint16_t vpData = mapGainToVP(currentGain);
         writeVPToDMT(vpAddresses[i], vpData);
-        delay(200); // Small delay between zone updates
+        delay(200);
       }
     }
+  }
+
+  // Ghi ký tự 'A' vào các VP text display
+  uint16_t vpTextAddresses[] = {0x3100, 0x3200, 0x3300, 0x3400};
+  for (int i = 0; i < 4; i++) {
+    // Gửi frame test_msg_A nhưng thay VP cho đúng từng địa chỉ
+    uint8_t msgA[8];
+    memcpy(msgA, test_msg_A, sizeof(test_msg_A));
+    msgA[4] = (uint8_t)(vpTextAddresses[i] >> 8); // VP high byte
+    msgA[5] = (uint8_t)(vpTextAddresses[i] & 0xFF); // VP low byte
+    DMTSerial.write(msgA, sizeof(msgA));
+    delay(100);
   }
 
   Serial.println("=== System Ready ===\n");
@@ -121,6 +125,11 @@ void setup() {
 
 // Function to connect to Vinternal WiFi only once
 void connectToWiFi() {
+  // Chuyển sang trang boot (06) khi bắt đầu kết nối WiFi
+  Serial.println("🔄 Starting WiFi connection - switching to boot page (06)...");
+  writeRegisterToDMT(0x03, 0x06); // Chuyển đến trang boot (ID 0x06)
+  delay(300);
+  
   Serial.println("\n>>> Starting WiFi connection process...");
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
@@ -165,11 +174,17 @@ void connectToWiFi() {
     Serial.println(" dBm");
     Serial.print("  MAC Address: ");
     Serial.println(WiFi.macAddress());
+    
+    // Sau khi WiFi kết nối thành công, chuyển về trang chính (00)
+    Serial.println("🔄 WiFi connected! Switching to main page (00)...");
+    writeRegisterToDMT(0x03, 0x00); // Chuyển về trang chính (ID 0x00)
+    delay(300);
   } else {
     Serial.println("\n✗ WiFi Connection failed!");
     Serial.printf("  Final WiFi Status: %d\n", WiFi.status());
     Serial.println("  Status meanings: 0=IDLE, 1=NO_SSID, 3=CONNECTED, 4=CONNECT_FAILED, 6=DISCONNECTED");
     Serial.println("⚠️ Check network name and password");
+    Serial.println("⚠️ Staying on boot page (06) due to WiFi failure");
   }
 }
 
@@ -207,13 +222,13 @@ uint8_t calculateHighByteFromGain(float gain) {
   return highByte;
 }
 
-// Function to write data to DMT VP address
+// Function to write data to DMT VP address (2 bytes data)
 void writeVPToDMT(uint16_t vpAddress, uint16_t vpData) {
-  // DMT Write VP command: 5A A5 05 82 [VP_High] [VP_Low] [Data_High] [Data_Low]
+  // DGUS1 Write VP command: 5A A5 05 82 [VP_High] [VP_Low] [Data_High] [Data_Low]
   uint8_t writeVPCommand[] = {
     0x5A, 0xA5,                    // Header
     0x05,                          // Length
-    0x82,                          // Write VP command
+    0x82,                          // Write VP command (Variable SRAM)
     (uint8_t)(vpAddress >> 8),     // VP address high byte
     (uint8_t)(vpAddress & 0xFF),   // VP address low byte
     (uint8_t)(vpData >> 8),        // Data high byte
@@ -221,6 +236,54 @@ void writeVPToDMT(uint16_t vpAddress, uint16_t vpData) {
   };
   
   DMTSerial.write(writeVPCommand, sizeof(writeVPCommand));
+}
+
+// Function to read data from DMT VP address (2 bytes data)
+uint16_t readVPFromDMT(uint16_t vpAddress) {
+  // DGUS1 Read VP command: 5A A5 04 83 [VP_High] [VP_Low] [LEN]
+  uint8_t readVPCommand[] = {
+    0x5A, 0xA5,                    // Header
+    0x04,                          // Length
+    0x83,                          // Read VP command (Variable SRAM)
+    (uint8_t)(vpAddress >> 8),     // VP address high byte
+    (uint8_t)(vpAddress & 0xFF),   // VP address low byte
+    0x01                           // Read 1 word (2 bytes)
+  };
+  
+  DMTSerial.write(readVPCommand, sizeof(readVPCommand));
+  // Note: Response handling should be implemented in handleDMTData()
+  return 0; // Placeholder
+}
+
+// Function to write to DGUS1 Register (1 byte data only)
+void writeRegisterToDMT(uint8_t regAddress, uint8_t regData) {
+  // DGUS1 Write Register command: 5A A5 04 80 [REG_Addr] [Data]
+  uint8_t writeRegCommand[] = {
+    0x5A, 0xA5,                    // Header
+    0x04,                          // Length (4 bytes after header)
+    0x80,                          // Write Register command
+    regAddress,                    // Register address (1 byte)
+    regData                        // Register data (1 byte)
+  };
+  
+  DMTSerial.write(writeRegCommand, sizeof(writeRegCommand));
+  Serial.printf("📄 Register write: 0x%02X = 0x%02X\n", regAddress, regData);
+}
+
+// Function to read from DGUS1 Register (1 byte data only)
+uint8_t readRegisterFromDMT(uint8_t regAddress) {
+  // DGUS1 Read Register command: 5A A5 03 81 [REG_Addr] [LEN]
+  uint8_t readRegCommand[] = {
+    0x5A, 0xA5,                    // Header
+    0x03,                          // Length (3 bytes after header)
+    0x81,                          // Read Register command
+    regAddress,                    // Register address (1 byte)
+    0x01                           // Read 1 byte
+  };
+  
+  DMTSerial.write(readRegCommand, sizeof(readRegCommand));
+  // Note: Response handling should be implemented in handleDMTData()
+  return 0; // Placeholder
 }
 
 // Function to read current gain from Mezzo API for specific zone
@@ -732,7 +795,11 @@ void loop() {
   if (millis() - lastWiFiCheck > 30000) {
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("⚠️  WiFi disconnected, attempting to reconnect...");
+      // Chuyển sang trang boot (06) khi reconnect
+      writeRegisterToDMT(0x03, 0x06);
+      delay(200);
       connectToWiFi();
+      // connectToWiFi() sẽ tự động chuyển về trang 00 nếu thành công
     }
     lastWiFiCheck = millis();
   }
