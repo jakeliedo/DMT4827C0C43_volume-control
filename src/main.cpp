@@ -142,8 +142,8 @@ void connectToWiFi() {
     Serial.printf("  %d: %s (RSSI: %d dBm)%s\n", i + 1, WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? " [OPEN]" : "");
   }
 
-  const char* ssid = "Roll";
-  const char* password = "0908800130";
+  const char* ssid = "Vinternal";
+  const char* password = "abcd123456";
 
   // Hiển thị thông báo kết nối WiFi
   String connectMsg = "Connecting to " + String(ssid) + " : " + String(password);
@@ -184,12 +184,16 @@ void connectToWiFi() {
     writeTextToDMT(0x3300, "Wifi Connected");
     delay(100);
     
-    // Bật icon WiFi ON (VP 0x3500 = 0x0001)
+    // Xóa trắng VP 0x3400 để ngăn hiển thị "Wifi failed" cũ
+    writeTextToDMT(0x3400, "            "); // 12 ký tự trống
+    delay(100);
+    
+    // Bật icon WiFi ON (VP 0x2000 = 0x0001)
     uint8_t wifiOnCommand[] = {
       0x5A, 0xA5,                    // Header
       0x05,                          // Length (5 bytes after header)
       0x82,                          // Write VP command
-      0x35, 0x00,                    // VP address 0x3500 (WiFi icon)
+      0x20, 0x00,                    // VP address 0x2000 (WiFi icon)
       0x00, 0x01                     // Data 0x0001 (WiFi ON)
     };
     DMTSerial.write(wifiOnCommand, sizeof(wifiOnCommand));
@@ -204,6 +208,17 @@ void connectToWiFi() {
     writeTextToDMT(0x3300, "...");
     delay(100);
     writeTextToDMT(0x3400, "Wifi failed");
+    delay(100);
+    
+    // Tắt icon WiFi OFF (VP 0x2000 = 0x0000)
+    uint8_t wifiOffCommand[] = {
+      0x5A, 0xA5,                    // Header
+      0x05,                          // Length (5 bytes after header)
+      0x82,                          // Write VP command
+      0x20, 0x00,                    // VP address 0x2000 (WiFi icon)
+      0x00, 0x00                     // Data 0x0000 (WiFi OFF)
+    };
+    DMTSerial.write(wifiOffCommand, sizeof(wifiOffCommand));
     delay(100);
   }
 }
@@ -274,6 +289,30 @@ void writeVPToDMT(uint16_t vpAddress, uint16_t vpData) {
   DMTSerial.write(writeVPCommand, sizeof(writeVPCommand));
 }
 
+// Function to check WiFi status after HTTP failure and update display accordingly
+void checkWiFiAfterHTTPFailure() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("⚠️  WiFi disconnected detected after HTTP failure");
+    
+    // Turn OFF WiFi icon
+    uint8_t wifiOffCommand[] = {
+      0x5A, 0xA5,                    // Header
+      0x05,                          // Length (5 bytes after header)
+      0x82,                          // Write VP command
+      0x20, 0x00,                    // VP address 0x2000 (WiFi icon)
+      0x00, 0x00                     // Data 0x0000 (WiFi OFF)
+    };
+    DMTSerial.write(wifiOffCommand, sizeof(wifiOffCommand));
+    delay(100);
+    
+    // Show disconnection message
+    writeTextToDMT(0x3300, "...");
+    delay(100);
+    writeTextToDMT(0x3400, "Wifi failed");
+    delay(100);
+  }
+}
+
 // Function to write ASCII text to DMT VP address (GBK encoding, 1 byte per character)
 void writeTextToDMT(uint16_t vpAddress, const char* text) {
   if (text == nullptr) return;
@@ -339,12 +378,6 @@ void writeRegisterToDMT(uint8_t regAddress, uint8_t dataHigh, uint8_t dataLow) {
     dataLow                        // Data low byte
   };
   DMTSerial.write(writeRegCommand, sizeof(writeRegCommand));
-  Serial.printf("📄 Register write: 0x%02X = 0x%02X%02X\n", regAddress, dataHigh, dataLow);
-  Serial.print("📤 Frame sent: ");
-  for (int i = 0; i < sizeof(writeRegCommand); i++) {
-    Serial.printf("%02X ", writeRegCommand[i]);
-  }
-  Serial.println();
 }
 
 // Function to read from DGUS1 Register (1 byte data only)
@@ -375,7 +408,6 @@ void switchPageToDMT(uint16_t pageId) {
     (uint8_t)(pageId & 0xFF)       // Page ID low byte
   };
   DMTSerial.write(switchPageCommand, sizeof(switchPageCommand));
-  Serial.printf("📄 Page switch to: 0x%04X\n", pageId);
 }
 
 // Function to read current gain from Mezzo API for specific zone
@@ -445,6 +477,10 @@ float readGainFromZone(uint16_t vpAddress) {
                 }
             }
         }
+    } else {
+        Serial.printf("❌ HTTP Error: %d (readGainFromZone)\n", httpResponseCode);
+        // Check if WiFi disconnected and update display
+        checkWiFiAfterHTTPFailure();
     }
     
     http.end();
@@ -504,6 +540,9 @@ void sendVolumeToMezzo(int volume) {
   } else {
     Serial.printf("❌ HTTP Error: %d (after %lu ms)\n", httpResponseCode, responseTime);
     Serial.println("   Possible causes: Network timeout, Mezzo device offline, wrong IP/port");
+    
+    // Check if WiFi disconnected and update display
+    checkWiFiAfterHTTPFailure();
   }
   
   http.end();
@@ -538,11 +577,6 @@ void sendVolumeToZone(uint16_t vpAddress, int volume) {
         }
     }
     if (zoneIdx == -1) {
-        Serial.printf("❌ Unknown VP address: 0x%04X\n", vpAddress);
-        Serial.println("🔍 DEBUG: Known VP addresses:");
-        for (int i = 0; i < numZones; i++) {
-            Serial.printf("   0x%04X → %s (ZoneId: %u)\n", zones[i].vpAddr, zones[i].name, zones[i].zoneId);
-        }
         return;
     }
     // Convert VP data directly to gain using corrected formula
@@ -562,7 +596,6 @@ void sendVolumeToZone(uint16_t vpAddress, int volume) {
         if (gain > 1.0f) gain = 1.0f;  // Cap at 1.0
     }
     
-    Serial.printf("🔊 Sending volume %d%% (Gain: %.5f) to %s (ZoneId: %u, zoneNumber: %d)\n", volume, gain, zones[zoneIdx].name, zones[zoneIdx].zoneId, zones[zoneIdx].zoneNumber);
     HTTPClient http;
     
     // Primary URL works well based on endpoint discovery
@@ -573,7 +606,7 @@ void sendVolumeToZone(uint16_t vpAddress, int volume) {
     http.addHeader("Installation-Client-Id", "0add066f-0458-4a61-9f57-c3a82fbb63f9");
     http.addHeader("Origin", String("http://") + mezzoIP);
     http.addHeader("Referer", String("http://") + mezzoIP + "/webapp/views/730665316");
-    http.setTimeout(5000);
+    http.setTimeout(2000); // Reduced timeout to 2s
     
     // Build JSON payload
     JsonDocument doc;
@@ -588,11 +621,12 @@ void sendVolumeToZone(uint16_t vpAddress, int volume) {
     int httpResponseCode = http.PUT(jsonString);
     unsigned long responseTime = millis() - startTime;
     if (httpResponseCode > 0) {
-        String response = http.getString();
-        Serial.printf("✅ HTTP Response: %d (in %lu ms)\n", httpResponseCode, responseTime);
+        Serial.printf("✅ HTTP %d (%.0f ms)\n", httpResponseCode, responseTime);
     } else {
-        Serial.printf("❌ HTTP Error: %d (after %lu ms)\n", httpResponseCode, responseTime);
-        Serial.println("   Possible causes: Network timeout, Mezzo device offline, wrong IP/port");
+        Serial.printf("❌ HTTP Error: %d\n", httpResponseCode);
+        
+        // Check if WiFi disconnected and update display
+        checkWiFiAfterHTTPFailure();
     }
     http.end();
 }
@@ -644,7 +678,7 @@ void sendVolumeToZoneWithVPData(uint16_t vpAddress, uint16_t vpData) {
         if (gain > 1.0f) gain = 1.0f;  // Cap at 1.0
     }
     
-    Serial.printf("� Sending Vol %d to %s (Gain: %.3f)\n", dec_volume, zones[zoneIdx].name, gain);
+    Serial.printf("🔊 Vol %d to %s (Gain: %.3f)\n", dec_volume, zones[zoneIdx].name, gain);
     
     HTTPClient http;
     String url = String("http://") + mezzoIP + "/iv/views/web/730665316/zone-controls/" + String(zones[zoneIdx].zoneNumber);
@@ -654,7 +688,7 @@ void sendVolumeToZoneWithVPData(uint16_t vpAddress, uint16_t vpData) {
     http.addHeader("Installation-Client-Id", "0add066f-0458-4a61-9f57-c3a82fbb63f9");
     http.addHeader("Origin", String("http://") + mezzoIP);
     http.addHeader("Referer", String("http://") + mezzoIP + "/webapp/views/730665316");
-    http.setTimeout(500); // Reduced timeout to 0.5s
+    http.setTimeout(300); // Very short timeout for volume changes
     
     // Build JSON payload
     JsonDocument doc;
@@ -670,6 +704,9 @@ void sendVolumeToZoneWithVPData(uint16_t vpAddress, uint16_t vpData) {
         Serial.printf("✅ HTTP %d\n", httpResponseCode);
     } else {
         Serial.printf("❌ HTTP Error: %d\n", httpResponseCode);
+        
+        // Check if WiFi disconnected and update display
+        checkWiFiAfterHTTPFailure();
     }
     http.end();
 }
@@ -805,12 +842,6 @@ void handleDMTData() {
           uint8_t expectedFrameLength = dmtBuffer[2] + 3;
           if (bufferIndex >= expectedFrameLength) {
             // Complete frame received
-            String cmdType = "";
-            if (dmtBuffer[3] == DMT_CMD_WRITE_VP) cmdType = "write VP";
-            else if (dmtBuffer[3] == DMT_CMD_READ_VP) cmdType = "read VP";
-            else if (dmtBuffer[3] == DMT_CMD_READ_RTC) cmdType = "read RTC";
-            else cmdType = "unknown";
-            Serial.println("Frame HD: length:" + String(expectedFrameLength) + ", complete, " + cmdType);
             processDMTFrame(dmtBuffer, bufferIndex);
             bufferIndex = 0;
             frameStarted = false;
@@ -833,13 +864,46 @@ void loop() {
     lastBlink = millis();
   }
   
-  // Check WiFi connection status every 30 seconds
+  // Check WiFi connection status every 5 seconds (reduced from 30s for better responsiveness)
   static unsigned long lastWiFiCheck = 0;
-  if (millis() - lastWiFiCheck > 30000) {
+  if (millis() - lastWiFiCheck > 5000) { // Check every 5 seconds
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("⚠️  WiFi disconnected, attempting to reconnect...");
+      
+      // Turn OFF WiFi icon immediately when disconnected
+      uint8_t wifiOffCommand[] = {
+        0x5A, 0xA5,                    // Header
+        0x05,                          // Length (5 bytes after header)
+        0x82,                          // Write VP command
+        0x20, 0x00,                    // VP address 0x2000 (WiFi icon)
+        0x00, 0x00                     // Data 0x0000 (WiFi OFF)
+      };
+      DMTSerial.write(wifiOffCommand, sizeof(wifiOffCommand));
+      delay(100);
+      
+      // Show disconnection message
+      writeTextToDMT(0x3300, "...");
+      delay(100);
+      writeTextToDMT(0x3400, "Wifi failed");
+      delay(100);
+      
       connectToWiFi();
-      // connectToWiFi() sẽ tự động hiển thị thông báo trạng thái
+      // connectToWiFi() sẽ tự động hiển thị thông báo trạng thái và bật icon nếu kết nối thành công
+    } else {
+      // WiFi is connected - ensure icon is ON and clear any failure message
+      uint8_t wifiOnCommand[] = {
+        0x5A, 0xA5,                    // Header
+        0x05,                          // Length (5 bytes after header)
+        0x82,                          // Write VP command
+        0x20, 0x00,                    // VP address 0x2000 (WiFi icon)
+        0x00, 0x01                     // Data 0x0001 (WiFi ON)
+      };
+      DMTSerial.write(wifiOnCommand, sizeof(wifiOnCommand));
+      delay(50);
+      
+      // Clear any failure message that might be displayed
+      writeTextToDMT(0x3400, "            ");
+      delay(50);
     }
     lastWiFiCheck = millis();
   }
@@ -872,10 +936,8 @@ void loop() {
   
   // Periodically read current gain from Mezzo and update DMT display
   static unsigned long lastGainUpdate = 0;
-  if (millis() - lastGainUpdate > 10000) { // Changed from 30000 to 10000 (10 seconds)
+  if (millis() - lastGainUpdate > 15000) { // Increased from 10s to 15s to reduce blocking
     if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("🔄 Periodic gain update...");
-      
       // Read and update all zones
       uint16_t vpAddresses[] = {0x1100, 0x1200, 0x1300, 0x1400};
       for (int i = 0; i < 4; i++) {
@@ -883,17 +945,16 @@ void loop() {
         if (currentGain > 0.0f) {
           uint16_t vpData = mapGainToVP(currentGain);
           writeVPToDMT(vpAddresses[i], vpData);  // Sử dụng overload với uint16_t
-          delay(200); // Reduced delay
+          delay(100); // Reduced delay from 200ms to 100ms
         }
       }
     }
     lastGainUpdate = millis();
   }
   
-  // Optional: Send command to read VP address 0x1000 every 30 seconds for testing
+  // Optional: Send command to read VP address 0x1000 every 60 seconds for testing
   static unsigned long lastVPRead = 0;
-  if (millis() - lastVPRead > 30000) {
-    // Send command to read VP: 5A A5 04 83 10 00
+  if (millis() - lastVPRead > 60000) { // Increased from 30s to 60s
     uint8_t readVPCommand[] = {0x5A, 0xA5, 0x04, 0x83, 0x10, 0x00};
     DMTSerial.write(readVPCommand, sizeof(readVPCommand));
     lastVPRead = millis();
