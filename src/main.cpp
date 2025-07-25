@@ -12,9 +12,10 @@
 
 // WiFi credentials in priority order
 const char* wifiNetworks[][2] = {
+  {"Vinternal", "abcd123456"},
   {"Floor 9", "Veg@s123"},
   {"Roll", "0908800130"},
-  {"Vinternal", "abcd123456"}
+  {"MQTT", "@12345678"}
 };
 const int numWifiNetworks = sizeof(wifiNetworks) / sizeof(wifiNetworks[0]);
 
@@ -53,12 +54,18 @@ void sendVolumeToZoneWithVPData(uint16_t vpAddress, uint16_t vpData);
 void discoverMezzoEndpoints();
 float readGainFromZone(uint16_t vpAddress);
 
+// Helper to get current RSSI value
+int getCurrentWiFiRSSI() {
+  if (WiFi.status() == WL_CONNECTED) {
+    return WiFi.RSSI();
+  }
+  return 0;
+}
+
 // DGUS1 Register functions
 void writeRegisterToDMT(uint8_t regAddress, uint8_t dataHigh, uint8_t dataLow);
 uint8_t readRegisterFromDMT(uint8_t regAddress);
 
-// DGUS1 Page functions
-void switchPageToDMT(uint16_t pageId);
 
 // DGUS1 VP functions
 void writeVPToDMT(uint16_t vpAddress, int volume);
@@ -102,9 +109,6 @@ void setup() {
   writeTextToDMT(0x3100, "Booting...");
   delay(100);
 
-  // Chuyển đến trang 06 sau khi khởi tạo hệ thống
-  switchPageToDMT(0x06);
-  delay(300);
 
   // Bắt đầu kết nối WiFi (sẽ chuyển sang trang boot 06 tự động)
   connectToWiFi();
@@ -126,10 +130,9 @@ void setup() {
   Serial.println("=== System Ready ===\n");
 }
 
-// Function to connect to Vinternal WiFi only once
+// Function to connect to WiFi networks in priority order
 void connectToWiFi() {
   Serial.println("🔄 Starting WiFi connection...");
-  
   Serial.println("\n>>> Starting WiFi connection process...");
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
@@ -142,74 +145,102 @@ void connectToWiFi() {
     Serial.printf("  %d: %s (RSSI: %d dBm)%s\n", i + 1, WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? " [OPEN]" : "");
   }
 
-  const char* ssid = "Vinternal";
-  const char* password = "abcd123456";
+  bool connected = false;
+  for (int netIdx = 0; netIdx < numWifiNetworks; netIdx++) {
+    const char* ssid = wifiNetworks[netIdx][0];
+    const char* password = wifiNetworks[netIdx][1];
 
-  // Hiển thị thông báo kết nối WiFi
-  String connectMsg = "Connecting to " + String(ssid) + " : " + String(password);
-  writeTextToDMT(0x3200, connectMsg.c_str());
-  delay(100);
+    // Clear VP 0x3200 with 40 spaces before showing new connection message
+    writeTextToDMT(0x3200, "                                        "); // 40 spaces
+    delay(50);
+    String connectMsg = "Connecting to " + String(ssid) + " : " + String(password);
+    writeTextToDMT(0x3200, connectMsg.c_str());
+    delay(100);
 
-  Serial.print(">>> Attempting to connect to: ");
-  Serial.println(ssid);
-  Serial.print(">>> Password length: ");
-  Serial.println(strlen(password));
+    Serial.print(">>> Attempting to connect to: ");
+    Serial.println(ssid);
+    Serial.print(">>> Password length: ");
+    Serial.println(strlen(password));
 
-  WiFi.begin(ssid, password);
-  
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
-    
-    if (attempts % 10 == 0) {
-      Serial.printf(" [%d/30] Status: %d ", attempts, WiFi.status());
+    WiFi.begin(ssid, password);
+
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+      delay(500);
+      Serial.print(".");
+      attempts++;
+      if (attempts % 10 == 0) {
+        Serial.printf(" [%d/30] Status: %d ", attempts, WiFi.status());
+      }
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("\n✓ WiFi Connected Successfully!");
+      Serial.print("  Network: ");
+      Serial.println(ssid);
+      Serial.print("  IP Address: ");
+      Serial.println(WiFi.localIP());
+      Serial.print("  Signal Strength: ");
+      Serial.print(WiFi.RSSI());
+      Serial.println(" dBm");
+      Serial.print("  MAC Address: ");
+      Serial.println(WiFi.macAddress());
+
+      // Hiển thị thông báo kết nối thành công kèm RSSI
+      int rssi = getCurrentWiFiRSSI();
+      String wifiMsg = "Wifi Connected RSSI = " + String(rssi);
+      writeTextToDMT(0x3300, wifiMsg.c_str());
+      delay(100);
+
+      // Xóa trắng VP 0x3400 để ngăn hiển thị "Wifi failed" cũ
+      writeTextToDMT(0x3400, "            "); // 12 ký tự trống
+      delay(100);
+
+      // Bật icon WiFi ON (VP 0x2000 = 0x0001)
+      uint8_t wifiOnCommand[] = {
+        0x5A, 0xA5,                    // Header
+        0x05,                          // Length (5 bytes after header)
+        0x82,                          // Write VP command
+        0x20, 0x00,                    // VP address 0x2000 (WiFi icon)
+        0x00, 0x01                     // Data 0x0001 (WiFi ON)
+      };
+      DMTSerial.write(wifiOnCommand, sizeof(wifiOnCommand));
+      delay(100);
+      connected = true;
+      break; // Stop after first successful connection
+    } else {
+      Serial.println("\n✗ WiFi Connection failed for SSID: " + String(ssid));
+      Serial.printf("  Final WiFi Status: %d\n", WiFi.status());
+      Serial.println("  Status meanings: 0=IDLE, 1=NO_SSID, 3=CONNECTED, 4=CONNECT_FAILED, 6=DISCONNECTED");
+      Serial.println("⚠️ Check network name and password");
+
+      // Hiển thị thông báo kết nối thất bại
+      writeTextToDMT(0x3300, "...");
+      delay(100);
+      writeTextToDMT(0x3400, "Wifi failed");
+      delay(100);
+
+      // Tắt icon WiFi OFF (VP 0x2000 = 0x0000)
+      uint8_t wifiOffCommand[] = {
+        0x5A, 0xA5,                    // Header
+        0x05,                          // Length (5 bytes after header)
+        0x82,                          // Write VP command
+        0x20, 0x00,                    // VP address 0x2000 (WiFi icon)
+        0x00, 0x00                     // Data 0x0000 (WiFi OFF)
+      };
+      DMTSerial.write(wifiOffCommand, sizeof(wifiOffCommand));
+      delay(100);
+      WiFi.disconnect();
+      delay(500);
     }
   }
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n✓ WiFi Connected Successfully!");
-    Serial.print("  Network: ");
-    Serial.println(ssid);
-    Serial.print("  IP Address: ");
-    Serial.println(WiFi.localIP());
-    Serial.print("  Signal Strength: ");
-    Serial.print(WiFi.RSSI());
-    Serial.println(" dBm");
-    Serial.print("  MAC Address: ");
-    Serial.println(WiFi.macAddress());
-    
-    // Hiển thị thông báo kết nối thành công
-    writeTextToDMT(0x3300, "Wifi Connected");
-    delay(100);
-    
-    // Xóa trắng VP 0x3400 để ngăn hiển thị "Wifi failed" cũ
-    writeTextToDMT(0x3400, "            "); // 12 ký tự trống
-    delay(100);
-    
-    // Bật icon WiFi ON (VP 0x2000 = 0x0001)
-    uint8_t wifiOnCommand[] = {
-      0x5A, 0xA5,                    // Header
-      0x05,                          // Length (5 bytes after header)
-      0x82,                          // Write VP command
-      0x20, 0x00,                    // VP address 0x2000 (WiFi icon)
-      0x00, 0x01                     // Data 0x0001 (WiFi ON)
-    };
-    DMTSerial.write(wifiOnCommand, sizeof(wifiOnCommand));
-    delay(100);
-  } else {
-    Serial.println("\n✗ WiFi Connection failed!");
-    Serial.printf("  Final WiFi Status: %d\n", WiFi.status());
-    Serial.println("  Status meanings: 0=IDLE, 1=NO_SSID, 3=CONNECTED, 4=CONNECT_FAILED, 6=DISCONNECTED");
-    Serial.println("⚠️ Check network name and password");
-    
-    // Hiển thị thông báo kết nối thất bại
-    writeTextToDMT(0x3300, "...");
+
+  if (!connected) {
+    Serial.println("\n✗ All WiFi connection attempts failed!");
+    writeTextToDMT(0x3300, "All Wifi failed");
     delay(100);
     writeTextToDMT(0x3400, "Wifi failed");
     delay(100);
-    
     // Tắt icon WiFi OFF (VP 0x2000 = 0x0000)
     uint8_t wifiOffCommand[] = {
       0x5A, 0xA5,                    // Header
@@ -396,19 +427,6 @@ uint8_t readRegisterFromDMT(uint8_t regAddress) {
   return 0; // Placeholder
 }
 
-// Function to switch page on DMT display
-void switchPageToDMT(uint16_t pageId) {
-  // DGUS1 Write VP command for page switching: 5A A5 05 82 00 10 [Page_High] [Page_Low]
-  uint8_t switchPageCommand[] = {
-    0x5A, 0xA5,                    // Header
-    0x05,                          // Length (5 bytes after header)
-    0x82,                          // Write VP command
-    0x00, 0x10,                    // VP address 0x0010 (Page switch VP)
-    (uint8_t)(pageId >> 8),        // Page ID high byte
-    (uint8_t)(pageId & 0xFF)       // Page ID low byte
-  };
-  DMTSerial.write(switchPageCommand, sizeof(switchPageCommand));
-}
 
 // Function to read current gain from Mezzo API for specific zone
 float readGainFromZone(uint16_t vpAddress) {
@@ -932,6 +950,15 @@ void loop() {
     Serial.printf("💓 System Heartbeat - Uptime: %lu seconds, Free Heap: %d bytes\n", 
                   millis() / 1000, ESP.getFreeHeap());
     lastHeartbeat = millis();
+  }
+
+  // Update RSSI display every 10 seconds if WiFi is connected
+  static unsigned long lastRSSIUpdate = 0;
+  if (WiFi.status() == WL_CONNECTED && millis() - lastRSSIUpdate > 2000) {
+    int rssi = getCurrentWiFiRSSI();
+    String rssiMsg = "RSSI=" + String(rssi);
+    writeTextToDMT(0x3400, rssiMsg.c_str());
+    lastRSSIUpdate = millis();
   }
   
   // Periodically read current gain from Mezzo and update DMT display
