@@ -10,11 +10,11 @@
 #define UART_TX_PIN 21      // UART TX for DMT touchscreen
 #define UART_RX_PIN 20      // UART RX for DMT touchscreen
 
-// WiFi credentials in priority order
+// WiFi credentials in priority order (Vinternal first)
 const char* wifiNetworks[][2] = {
+  {"Vinternal", "abcd123456"},
   {"Floor 9", "Veg@s123"},
-  {"Roll", "0908800130"},
-  {"Vinternal", "abcd123456"}
+  {"Roll", "0908800130"}
 };
 const int numWifiNetworks = sizeof(wifiNetworks) / sizeof(wifiNetworks[0]);
 
@@ -126,7 +126,7 @@ void setup() {
   Serial.println("=== System Ready ===\n");
 }
 
-// Function to connect to Vinternal WiFi only once
+// Function to connect to available WiFi networks in priority order
 void connectToWiFi() {
   Serial.println("🔄 Starting WiFi connection...");
   
@@ -142,13 +142,52 @@ void connectToWiFi() {
     Serial.printf("  %d: %s (RSSI: %d dBm)%s\n", i + 1, WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? " [OPEN]" : "");
   }
 
-  const char* ssid = "Vinternal";
-  const char* password = "abcd123456";
+  // Try to connect to networks in priority order
+  const char* ssid = nullptr;
+  const char* password = nullptr;
+  bool networkFound = false;
+  
+  for (int priority = 0; priority < numWifiNetworks; priority++) {
+    for (int i = 0; i < n; i++) {
+      if (WiFi.SSID(i) == String(wifiNetworks[priority][0])) {
+        ssid = wifiNetworks[priority][0];
+        password = wifiNetworks[priority][1];
+        networkFound = true;
+        Serial.printf(">>> Found priority network: %s (Priority: %d)\n", ssid, priority + 1);
+        break;
+      }
+    }
+    if (networkFound) break;
+  }
+  
+  if (!networkFound) {
+    Serial.println("❌ No known networks found!");
+    // Show network not found message
+    writeTextToDMT(0x3200, "No known networks");
+    delay(100);
+    writeTextToDMT(0x3300, "...");
+    delay(100);
+    writeTextToDMT(0x3400, "Wifi failed");
+    delay(100);
+    
+    // Turn OFF WiFi icon
+    uint8_t wifiOffCommand[] = {
+      0x5A, 0xA5, 0x05, 0x82, 0x20, 0x00, 0x00, 0x00
+    };
+    DMTSerial.write(wifiOffCommand, sizeof(wifiOffCommand));
+    return;
+  }
 
   // Hiển thị thông báo kết nối WiFi
-  String connectMsg = "Connecting to " + String(ssid) + " : " + String(password);
+  String connectMsg = "Connecting to " + String(ssid);
   writeTextToDMT(0x3200, connectMsg.c_str());
   delay(100);
+  
+  // Xóa các thông báo trạng thái cũ
+  writeTextToDMT(0x3300, "                 "); // Clear status message
+  delay(50);
+  writeTextToDMT(0x3400, "                 "); // Clear failure message
+  delay(50);
 
   Serial.print(">>> Attempting to connect to: ");
   Serial.println(ssid);
