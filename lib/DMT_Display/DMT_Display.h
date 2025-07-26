@@ -63,6 +63,7 @@ public:
     
     // WiFi status display helpers
     void showWiFiIcon(bool isConnected);
+    void showNodeOnlineIcon(uint16_t vpAddress, bool online);
     void showConnectionStatus(const char* message, uint16_t vpAddress = 0x3300);
     void showConnectionError(const char* message, uint16_t vpAddress = 0x3400);
     void clearText(uint16_t vpAddress, int numChars = 40);

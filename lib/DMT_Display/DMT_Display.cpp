@@ -307,3 +307,18 @@ void DMT_Display::showBootMessage(const char* message) {
 void DMT_Display::showSystemReady() {
     writeText(0x3100, "System Ready");
 }
+
+// Show node online/offline icon at VP address (0x4100, 0x4200, 0x4300, 0x4400)
+void DMT_Display::showNodeOnlineIcon(uint16_t vpAddress, bool online) {
+    // Ensure VP address is one of 0x4100, 0x4200, 0x4300, 0x4400
+    if (vpAddress != 0x4100 && vpAddress != 0x4200 && vpAddress != 0x4300 && vpAddress != 0x4400) return;
+    uint8_t iconCommand[] = {
+        DMT_HEADER_1, DMT_HEADER_2,    // Header
+        0x05,                          // Length (5 bytes after header)
+        DMT_CMD_WRITE_VP,              // Write VP command
+        (uint8_t)(vpAddress >> 8),     // VP address high byte
+        (uint8_t)(vpAddress & 0xFF),   // VP address low byte
+        0x00, static_cast<uint8_t>(online ? 0x01 : 0x00) // Data (0x01 online, 0x00 offline)
+    };
+    _serial->write(iconCommand, sizeof(iconCommand));
+}

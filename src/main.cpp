@@ -25,7 +25,7 @@ WiFiNetwork wifiNetworks[] = {
 const int numWifiNetworks = sizeof(wifiNetworks) / sizeof(wifiNetworks[0]);
 
 // Mezzo 604A device settings
-const char* mezzoIP = "192.168.101.30";
+const char* mezzoIP = "192.168.101.30;
 const int mezzoPort = 80;
 
 // Zone configuration for Mezzo
