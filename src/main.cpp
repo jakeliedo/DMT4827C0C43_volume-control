@@ -5,73 +5,69 @@
 #include <HardwareSerial.h>
 #include "message.h" // Include message arrays for DMT display
 
+// Include custom libraries
+#include "DMT_Display.h"
+#include "WiFi_Manager.h"
+#include "Mezzo_Controller.h"
+
 // Define pins for ESP32-C3 Super Mini
 #define LED_PIN 8           // Built-in LED
 #define UART_TX_PIN 21      // UART TX for DMT touchscreen
 #define UART_RX_PIN 20      // UART RX for DMT touchscreen
 
-// WiFi credentials in priority order (Vinternal first)
+// WiFi credentials in priority order
 const char* wifiNetworks[][2] = {
-  {"Vinternal", "abcd123456"},
   {"Floor 9", "Veg@s123"},
-  {"Roll", "0908800130"}
+  {"Roll", "0908800130"},
+  {"Vinternal", "abcd123456"}
 };
 const int numWifiNetworks = sizeof(wifiNetworks) / sizeof(wifiNetworks[0]);
 
 // Mezzo 604A device settings
-const char* mezzoIP = "192.168.101.30";
+const char* mezzoIP = "192.168.101.30;
 const int mezzoPort = 80;
 
-// Volume mapping constants
-#define VP_MIN_VALUE 0x100
-#define VP_MAX_VALUE 0x164
-#define VOLUME_MIN 0
-#define VOLUME_MAX 100
+// Zone configuration for Mezzo
+ZoneInfo zones[] = {
+  {0x1100, 1868704443, 5, "Zone 1"},
+  {0x1200, 4127125796, 6, "Zone 2"},
+  {0x1300, 2170320302, 7, "Zone 3"},
+  {0x1400, 2525320065, 8, "Zone 4"}
+};
+const int numZones = sizeof(zones) / sizeof(zones[0]);
 
-// DMT Protocol Constants
-#define DMT_HEADER_1 0x5A
-#define DMT_HEADER_2 0xA5
-#define DMT_CMD_READ_VP 0x83
-#define DMT_CMD_READ_RTC 0x81
-#define DMT_CMD_WRITE_VP 0x82
-#define DMT_CMD_WRITE_REG 0x80  // DGUS1 Write Register command
-#define DMT_BUFFER_SIZE 64
-
-// Create a second serial port for DMT touchscreen communication
+// Create instances of our custom libraries
 HardwareSerial DMTSerial(1);
+DMT_Display dmtDisplay(&DMTSerial);
+WiFi_Manager wifiManager(wifiNetworks, numWifiNetworks, &dmtDisplay);
+Mezzo_Controller mezzoController(mezzoIP, mezzoPort);
 
-// Buffer for receiving DMT data
-uint8_t dmtBuffer[DMT_BUFFER_SIZE];
-int bufferIndex = 0;
-bool frameStarted = false;
+// Global variables for volume change tracking
+static unsigned long lastVolumeChangeTime = 0;
+static uint16_t pendingVPAddress = 0;
+static bool pendingGainRead = false;
 
-// Forward declarations
-void connectToWiFi();
-void sendVolumeToMezzo(int volume);
-void sendVolumeToZone(uint16_t vpAddress, int volume);
-void sendVolumeToZoneWithVPData(uint16_t vpAddress, uint16_t vpData);
-void discoverMezzoEndpoints();
-float readGainFromZone(uint16_t vpAddress);
+// Callback function for VP data received from DMT
+void onVPDataReceived(uint16_t vpAddress, uint16_t vpData) {
+  uint8_t lowByte = vpData & 0xFF;
+  Serial.printf("🔊 VP: 0x%04X = 0x%04X (Vol: %d)\n", vpAddress, vpData, lowByte);
+  
+  // Send volume to Mezzo controller
+  mezzoController.sendVolumeToZoneWithVPData(vpAddress, vpData);
+  
+  // Schedule gain readback after 2 seconds
+  lastVolumeChangeTime = millis();
+  pendingVPAddress = vpAddress;
+  pendingGainRead = true;
+}
 
-// DGUS1 Register functions
-void writeRegisterToDMT(uint8_t regAddress, uint8_t dataHigh, uint8_t dataLow);
-uint8_t readRegisterFromDMT(uint8_t regAddress);
-
-// DGUS1 Page functions
-void switchPageToDMT(uint16_t pageId);
-
-// DGUS1 VP functions
-void writeVPToDMT(uint16_t vpAddress, int volume);
-void writeVPToDMT(uint16_t vpAddress, uint16_t vpData);
-void writeTextToDMT(uint16_t vpAddress, const char* text);  // ASCII text function
-void writeCharToDMT(uint16_t vpAddress, char character);    // Single ASCII character
-uint16_t readVPFromDMT(uint16_t vpAddress);
-
-uint16_t mapGainToVP(float gain);
-uint8_t calculateHighByteFromGain(float gain);
-int mapVPToVolume(uint16_t vpData);
-void processDMTFrame(uint8_t* frame, int frameLength);
-void handleDMTData();
+// Callback function for WiFi failure
+void onWiFiFailure() {
+  Serial.println("⚠️  WiFi disconnected detected after HTTP failure");
+  dmtDisplay.showWiFiIcon(false);
+  dmtDisplay.showConnectionStatus("...", 0x3300);
+  dmtDisplay.showConnectionError("Wifi failed", 0x3400);
+}
 
 void setup() {
   // Initialize USB CDC Serial
@@ -79,45 +75,38 @@ void setup() {
   delay(2000); // Give time for Serial to initialize
   
   Serial.println("\n=== ESP32-C3 DMT Remote Controller ===");
-  // Serial.print("Chip Model: ");
-  // Serial.println(ESP.getChipModel());
-  // Serial.print("Chip Revision: ");
-  // Serial.println(ESP.getChipRevision());
-  // Serial.print("Flash Size: ");
-  // Serial.println(ESP.getFlashChipSize());
-  // Serial.print("Free Heap: ");
-  // Serial.println(ESP.getFreeHeap());
   
   // Initialize LED pin
   pinMode(LED_PIN, OUTPUT);
-  //Serial.println("✓ LED pin initialized");
 
-  // Initialize UART for DMT touchscreen communication
-  DMTSerial.begin(115200, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
+  // Initialize DMT Display
+  dmtDisplay.begin(115200, UART_RX_PIN, UART_TX_PIN);
+  dmtDisplay.setVPDataCallback(onVPDataReceived);
   Serial.println("✓ DMT UART initialized (115200 baud, pins TX:" + String(UART_TX_PIN) + " RX:" + String(UART_RX_PIN) + ")");
+
+  // Initialize Mezzo Controller
+  mezzoController.setZones(zones, numZones);
+  mezzoController.setWiFiFailureCallback(onWiFiFailure);
+
+  // Initialize WiFi Manager
+  wifiManager.setAutoReconnect(true, 5000);  // Auto reconnect every 5 seconds
+  wifiManager.setRSSIUpdateInterval(2000);   // Update RSSI every 2 seconds
 
   Serial.println("✓ Hardware initialization complete");
 
-  // Hiển thị thông báo booting
-  writeTextToDMT(0x3100, "Booting...");
+  // Show booting message
+  dmtDisplay.showBootMessage("Booting...");
   delay(100);
 
-  // Chuyển đến trang 06 sau khi khởi tạo hệ thống
-  switchPageToDMT(0x06);
-  delay(300);
-
-  // Bắt đầu kết nối WiFi (sẽ chuyển sang trang boot 06 tự động)
-  connectToWiFi();
-  
-  // Sau khi WiFi kết nối xong, cập nhật volume ngay lập tức
-  if (WiFi.status() == WL_CONNECTED) {
+  // Start WiFi connection
+  if (wifiManager.connectToWiFi()) {
     Serial.println("🔄 Initial volume update after WiFi connection...");
-    uint16_t vpAddresses[] = {0x1100, 0x1200, 0x1300, 0x1400};
-    for (int i = 0; i < 4; i++) {
-      float currentGain = readGainFromZone(vpAddresses[i]);
+    // Update all zones with current gain values
+    for (int i = 0; i < numZones; i++) {
+      float currentGain = mezzoController.readGainFromZone(zones[i].vpAddr);
       if (currentGain > 0.0f) {
-        uint16_t vpData = mapGainToVP(currentGain);
-        writeVPToDMT(vpAddresses[i], vpData);  // Sử dụng overload với uint16_t
+        uint16_t vpData = mezzoController.mapGainToVP(currentGain);
+        dmtDisplay.writeVP(zones[i].vpAddr, vpData);
         delay(200);
       }
     }
@@ -126,7 +115,7 @@ void setup() {
   Serial.println("=== System Ready ===\n");
 }
 
-// Function to connect to available WiFi networks in priority order
+// Function to connect to Vinternal WiFi only once
 void connectToWiFi() {
   Serial.println("🔄 Starting WiFi connection...");
   
@@ -142,52 +131,13 @@ void connectToWiFi() {
     Serial.printf("  %d: %s (RSSI: %d dBm)%s\n", i + 1, WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? " [OPEN]" : "");
   }
 
-  // Try to connect to networks in priority order
-  const char* ssid = nullptr;
-  const char* password = nullptr;
-  bool networkFound = false;
-  
-  for (int priority = 0; priority < numWifiNetworks; priority++) {
-    for (int i = 0; i < n; i++) {
-      if (WiFi.SSID(i) == String(wifiNetworks[priority][0])) {
-        ssid = wifiNetworks[priority][0];
-        password = wifiNetworks[priority][1];
-        networkFound = true;
-        Serial.printf(">>> Found priority network: %s (Priority: %d)\n", ssid, priority + 1);
-        break;
-      }
-    }
-    if (networkFound) break;
-  }
-  
-  if (!networkFound) {
-    Serial.println("❌ No known networks found!");
-    // Show network not found message
-    writeTextToDMT(0x3200, "No known networks");
-    delay(100);
-    writeTextToDMT(0x3300, "...");
-    delay(100);
-    writeTextToDMT(0x3400, "Wifi failed");
-    delay(100);
-    
-    // Turn OFF WiFi icon
-    uint8_t wifiOffCommand[] = {
-      0x5A, 0xA5, 0x05, 0x82, 0x20, 0x00, 0x00, 0x00
-    };
-    DMTSerial.write(wifiOffCommand, sizeof(wifiOffCommand));
-    return;
-  }
+  const char* ssid = "Vinternal";
+  const char* password = "abcd123456";
 
   // Hiển thị thông báo kết nối WiFi
-  String connectMsg = "Connecting to " + String(ssid);
+  String connectMsg = "Connecting to " + String(ssid) + " : " + String(password);
   writeTextToDMT(0x3200, connectMsg.c_str());
   delay(100);
-  
-  // Xóa các thông báo trạng thái cũ
-  writeTextToDMT(0x3300, "                 "); // Clear status message
-  delay(50);
-  writeTextToDMT(0x3400, "                 "); // Clear failure message
-  delay(50);
 
   Serial.print(">>> Attempting to connect to: ");
   Serial.println(ssid);
@@ -903,64 +853,21 @@ void loop() {
     lastBlink = millis();
   }
   
-  // Check WiFi connection status every 5 seconds (reduced from 30s for better responsiveness)
-  static unsigned long lastWiFiCheck = 0;
-  if (millis() - lastWiFiCheck > 5000) { // Check every 5 seconds
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("⚠️  WiFi disconnected, attempting to reconnect...");
-      
-      // Turn OFF WiFi icon immediately when disconnected
-      uint8_t wifiOffCommand[] = {
-        0x5A, 0xA5,                    // Header
-        0x05,                          // Length (5 bytes after header)
-        0x82,                          // Write VP command
-        0x20, 0x00,                    // VP address 0x2000 (WiFi icon)
-        0x00, 0x00                     // Data 0x0000 (WiFi OFF)
-      };
-      DMTSerial.write(wifiOffCommand, sizeof(wifiOffCommand));
-      delay(100);
-      
-      // Show disconnection message
-      writeTextToDMT(0x3300, "...");
-      delay(100);
-      writeTextToDMT(0x3400, "Wifi failed");
-      delay(100);
-      
-      connectToWiFi();
-      // connectToWiFi() sẽ tự động hiển thị thông báo trạng thái và bật icon nếu kết nối thành công
-    } else {
-      // WiFi is connected - ensure icon is ON and clear any failure message
-      uint8_t wifiOnCommand[] = {
-        0x5A, 0xA5,                    // Header
-        0x05,                          // Length (5 bytes after header)
-        0x82,                          // Write VP command
-        0x20, 0x00,                    // VP address 0x2000 (WiFi icon)
-        0x00, 0x01                     // Data 0x0001 (WiFi ON)
-      };
-      DMTSerial.write(wifiOnCommand, sizeof(wifiOnCommand));
-      delay(50);
-      
-      // Clear any failure message that might be displayed
-      writeTextToDMT(0x3400, "            ");
-      delay(50);
-    }
-    lastWiFiCheck = millis();
-  }
+  // Handle WiFi auto-reconnect
+  wifiManager.handleAutoReconnect();
+  
+  // Update RSSI display
+  wifiManager.updateRSSIDisplay();
   
   // Handle incoming DMT data
-  handleDMTData();
+  dmtDisplay.handleIncomingData();
   
   // Non-blocking gain readback after volume changes
-  static unsigned long lastVolumeChangeTime = 0;
-  static uint16_t pendingVPAddress = 0;
-  static bool pendingGainRead = false;
-  
-  // Check for volume changes in processDMTFrame
   if (pendingGainRead && (millis() - lastVolumeChangeTime >= 2000)) {
-    float actualGain = readGainFromZone(pendingVPAddress);
+    float actualGain = mezzoController.readGainFromZone(pendingVPAddress);
     if (actualGain > 0.0f) {
-      uint16_t actualVPData = mapGainToVP(actualGain);
-      writeVPToDMT(pendingVPAddress, actualVPData);  // Sử dụng overload với uint16_t
+      uint16_t actualVPData = mezzoController.mapGainToVP(actualGain);
+      dmtDisplay.writeVP(pendingVPAddress, actualVPData);
     }
     pendingGainRead = false;
   }
@@ -975,16 +882,15 @@ void loop() {
   
   // Periodically read current gain from Mezzo and update DMT display
   static unsigned long lastGainUpdate = 0;
-  if (millis() - lastGainUpdate > 15000) { // Increased from 10s to 15s to reduce blocking
-    if (WiFi.status() == WL_CONNECTED) {
+  if (millis() - lastGainUpdate > 15000) { // Every 15 seconds
+    if (wifiManager.isConnected()) {
       // Read and update all zones
-      uint16_t vpAddresses[] = {0x1100, 0x1200, 0x1300, 0x1400};
-      for (int i = 0; i < 4; i++) {
-        float currentGain = readGainFromZone(vpAddresses[i]);
+      for (int i = 0; i < numZones; i++) {
+        float currentGain = mezzoController.readGainFromZone(zones[i].vpAddr);
         if (currentGain > 0.0f) {
-          uint16_t vpData = mapGainToVP(currentGain);
-          writeVPToDMT(vpAddresses[i], vpData);  // Sử dụng overload với uint16_t
-          delay(100); // Reduced delay from 200ms to 100ms
+          uint16_t vpData = mezzoController.mapGainToVP(currentGain);
+          dmtDisplay.writeVP(zones[i].vpAddr, vpData);
+          delay(100);
         }
       }
     }
@@ -993,9 +899,8 @@ void loop() {
   
   // Optional: Send command to read VP address 0x1000 every 60 seconds for testing
   static unsigned long lastVPRead = 0;
-  if (millis() - lastVPRead > 60000) { // Increased from 30s to 60s
-    uint8_t readVPCommand[] = {0x5A, 0xA5, 0x04, 0x83, 0x10, 0x00};
-    DMTSerial.write(readVPCommand, sizeof(readVPCommand));
+  if (millis() - lastVPRead > 60000) {
+    dmtDisplay.readVP(0x1000);
     lastVPRead = millis();
   }
 }
