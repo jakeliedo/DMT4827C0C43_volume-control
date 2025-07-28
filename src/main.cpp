@@ -3,12 +3,13 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <HardwareSerial.h>
-#include "message.h" // Include message arrays for DMT display
 
-// Include custom libraries
+// Include custom libraries first
 #include "DMT_Display.h"
 #include "WiFi_Manager.h"
 #include "Mezzo_Controller.h"
+
+#include "message.h" // Include message arrays for DMT display
 
 // Define pins for ESP32-C3 Super Mini
 #define LED_PIN 8           // Built-in LED
@@ -16,7 +17,7 @@
 #define UART_RX_PIN 20      // UART RX for DMT touchscreen
 
 // WiFi credentials in priority order
-const char* wifiNetworks[][2] = {
+WiFiNetwork wifiNetworks[] = {
   {"Floor 9", "Veg@s123"},
   {"Roll", "0908800130"},
   {"Vinternal", "abcd123456"}
@@ -24,7 +25,7 @@ const char* wifiNetworks[][2] = {
 const int numWifiNetworks = sizeof(wifiNetworks) / sizeof(wifiNetworks[0]);
 
 // Mezzo 604A device settings
-const char* mezzoIP = "192.168.101.30;
+const char* mezzoIP = "192.168.101.30";
 const int mezzoPort = 80;
 
 // Zone configuration for Mezzo
@@ -136,7 +137,7 @@ void connectToWiFi() {
 
   // Hiển thị thông báo kết nối WiFi
   String connectMsg = "Connecting to " + String(ssid) + " : " + String(password);
-  writeTextToDMT(0x3200, connectMsg.c_str());
+  dmtDisplay.writeText(0x3200, connectMsg.c_str());
   delay(100);
 
   Serial.print(">>> Attempting to connect to: ");
@@ -170,11 +171,11 @@ void connectToWiFi() {
     Serial.println(WiFi.macAddress());
     
     // Hiển thị thông báo kết nối thành công
-    writeTextToDMT(0x3300, "Wifi Connected");
+    dmtDisplay.writeText(0x3300, "Wifi Connected");
     delay(100);
     
     // Xóa trắng VP 0x3400 để ngăn hiển thị "Wifi failed" cũ
-    writeTextToDMT(0x3400, "            "); // 12 ký tự trống
+    dmtDisplay.writeText(0x3400, "            "); // 12 ký tự trống
     delay(100);
     
     // Bật icon WiFi ON (VP 0x2000 = 0x0001)
@@ -194,9 +195,9 @@ void connectToWiFi() {
     Serial.println("⚠️ Check network name and password");
     
     // Hiển thị thông báo kết nối thất bại
-    writeTextToDMT(0x3300, "...");
+    dmtDisplay.writeText(0x3300, "...");
     delay(100);
-    writeTextToDMT(0x3400, "Wifi failed");
+    dmtDisplay.writeText(0x3400, "Wifi failed");
     delay(100);
     
     // Tắt icon WiFi OFF (VP 0x2000 = 0x0000)
@@ -295,14 +296,16 @@ void checkWiFiAfterHTTPFailure() {
     delay(100);
     
     // Show disconnection message
-    writeTextToDMT(0x3300, "...");
+    dmtDisplay.writeText(0x3300, "...");
     delay(100);
-    writeTextToDMT(0x3400, "Wifi failed");
+    dmtDisplay.writeText(0x3400, "Wifi failed");
     delay(100);
   }
 }
 
+/*
 // Function to write ASCII text to DMT VP address (GBK encoding, 1 byte per character)
+// NOTE: This function has been moved to DMT_Display library
 void writeTextToDMT(uint16_t vpAddress, const char* text) {
   if (text == nullptr) return;
   
@@ -398,6 +401,7 @@ void switchPageToDMT(uint16_t pageId) {
   };
   DMTSerial.write(switchPageCommand, sizeof(switchPageCommand));
 }
+*/
 
 // Function to read current gain from Mezzo API for specific zone
 float readGainFromZone(uint16_t vpAddress) {
@@ -796,7 +800,9 @@ void processDMTFrame(uint8_t* frame, int frameLength) {
   }
 }
 
+/*
 // Function to handle incoming UART data
+// NOTE: This function has been moved to DMT_Display library as handleIncomingData()
 void handleDMTData() {
   while (DMTSerial.available()) {
     uint8_t incomingByte = DMTSerial.read();
@@ -838,12 +844,12 @@ void handleDMTData() {
         }
       } else {
         bufferIndex = 0;
-        frameStarted = false;
         Serial.println("Frame HD: length:overflow, uncomplete");
       }
     }
   }
 }
+*/
 
 void loop() {
   // Blink LED to show system is running
