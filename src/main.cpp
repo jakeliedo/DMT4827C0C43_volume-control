@@ -119,97 +119,114 @@ void setup() {
 // Function to connect to Vinternal WiFi only once
 void connectToWiFi() {
   Serial.println("🔄 Starting WiFi connection...");
-  
   Serial.println("\n>>> Starting WiFi connection process...");
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
-  delay(1000);
+  delay(500);
 
-  // Scan for available networks
-  int n = WiFi.scanNetworks();
-  Serial.printf("Found %d WiFi networks:\n", n);
-  for (int i = 0; i < n; ++i) {
-    Serial.printf("  %d: %s (RSSI: %d dBm)%s\n", i + 1, WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? " [OPEN]" : "");
-  }
+  // Danh sách mạng ưu tiên: Vinternal trước, sau đó các mạng còn lại
+  const char* preferredSSID = "Vinternal";
+  const char* preferredPass = "abcd123456";
 
-  const char* ssid = "Vinternal";
-  const char* password = "abcd123456";
+  struct Network {
+    const char* ssid;
+    const char* password;
+  };
 
-  // Hiển thị thông báo kết nối WiFi
-  String connectMsg = "Connecting to " + String(ssid) + " : " + String(password);
-  dmtDisplay.writeText(0x3200, connectMsg.c_str());
-  delay(100);
-
-  Serial.print(">>> Attempting to connect to: ");
-  Serial.println(ssid);
-  Serial.print(">>> Password length: ");
-  Serial.println(strlen(password));
-
-  WiFi.begin(ssid, password);
-  
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
-    
-    if (attempts % 10 == 0) {
-      Serial.printf(" [%d/30] Status: %d ", attempts, WiFi.status());
+  Network tryNetworks[4];
+  int tryCount = 0;
+  tryNetworks[tryCount++] = {preferredSSID, preferredPass};
+  // Thêm các mạng còn lại (không trùng Vinternal)
+  for (int i = 0; i < numWifiNetworks; ++i) {
+    if (strcmp(wifiNetworks[i].ssid, preferredSSID) != 0) {
+      tryNetworks[tryCount++] = {wifiNetworks[i].ssid, wifiNetworks[i].password};
     }
   }
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n✓ WiFi Connected Successfully!");
-    Serial.print("  Network: ");
+
+  bool connected = false;
+  for (int netIdx = 0; netIdx < tryCount && !connected; ++netIdx) {
+    const char* ssid = tryNetworks[netIdx].ssid;
+    const char* password = tryNetworks[netIdx].password;
+
+    String connectMsg = "Connecting to " + String(ssid) + " : " + String(password);
+    dmtDisplay.writeText(0x3200, connectMsg.c_str());
+    delay(50);
+
+    Serial.print(">>> Attempting to connect to: ");
     Serial.println(ssid);
-    Serial.print("  IP Address: ");
-    Serial.println(WiFi.localIP());
-    Serial.print("  Signal Strength: ");
-    Serial.print(WiFi.RSSI());
-    Serial.println(" dBm");
-    Serial.print("  MAC Address: ");
-    Serial.println(WiFi.macAddress());
-    
-    // Hiển thị thông báo kết nối thành công
-    dmtDisplay.writeText(0x3300, "Wifi Connected");
-    delay(100);
-    
-    // Xóa trắng VP 0x3400 để ngăn hiển thị "Wifi failed" cũ
-    dmtDisplay.writeText(0x3400, "            "); // 12 ký tự trống
-    delay(100);
-    
-    // Bật icon WiFi ON (VP 0x2000 = 0x0001)
-    uint8_t wifiOnCommand[] = {
-      0x5A, 0xA5,                    // Header
-      0x05,                          // Length (5 bytes after header)
-      0x82,                          // Write VP command
-      0x20, 0x00,                    // VP address 0x2000 (WiFi icon)
-      0x00, 0x01                     // Data 0x0001 (WiFi ON)
-    };
-    DMTSerial.write(wifiOnCommand, sizeof(wifiOnCommand));
-    delay(100);
-  } else {
-    Serial.println("\n✗ WiFi Connection failed!");
-    Serial.printf("  Final WiFi Status: %d\n", WiFi.status());
-    Serial.println("  Status meanings: 0=IDLE, 1=NO_SSID, 3=CONNECTED, 4=CONNECT_FAILED, 6=DISCONNECTED");
-    Serial.println("⚠️ Check network name and password");
-    
-    // Hiển thị thông báo kết nối thất bại
+    Serial.print(">>> Password length: ");
+    Serial.println(strlen(password));
+
+    WiFi.begin(ssid, password);
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 6) {
+      delay(400);
+      Serial.print(".");
+      attempts++;
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      connected = true;
+      Serial.println("\n✓ WiFi Connected Successfully!");
+      Serial.print("  Network: ");
+      Serial.println(ssid);
+      Serial.print("  IP Address: ");
+      Serial.println(WiFi.localIP());
+      Serial.print("  Signal Strength: ");
+      Serial.print(WiFi.RSSI());
+      Serial.println(" dBm");
+      Serial.print("  MAC Address: ");
+      Serial.println(WiFi.macAddress());
+
+      dmtDisplay.writeText(0x3300, "Wifi Connected");
+      delay(50);
+      dmtDisplay.writeText(0x3400, "            ");
+      delay(50);
+      uint8_t wifiOnCommand[] = {
+        0x5A, 0xA5,
+        0x05,
+        0x82,
+        0x20, 0x00,
+        0x00, 0x01
+      };
+      DMTSerial.write(wifiOnCommand, sizeof(wifiOnCommand));
+      delay(50);
+    } else {
+      Serial.println("\n✗ WiFi Connection failed for this network!");
+      Serial.printf("  Final WiFi Status: %d\n", WiFi.status());
+      dmtDisplay.writeText(0x3300, "...");
+      delay(50);
+      dmtDisplay.writeText(0x3400, "Wifi failed");
+      delay(50);
+      uint8_t wifiOffCommand[] = {
+        0x5A, 0xA5,
+        0x05,
+        0x82,
+        0x20, 0x00,
+        0x00, 0x00
+      };
+      DMTSerial.write(wifiOffCommand, sizeof(wifiOffCommand));
+      delay(50);
+      WiFi.disconnect();
+      delay(100);
+    }
+  }
+
+  if (!connected) {
+    Serial.println("\n✗ All WiFi attempts failed!");
     dmtDisplay.writeText(0x3300, "...");
-    delay(100);
+    delay(50);
     dmtDisplay.writeText(0x3400, "Wifi failed");
-    delay(100);
-    
-    // Tắt icon WiFi OFF (VP 0x2000 = 0x0000)
+    delay(50);
     uint8_t wifiOffCommand[] = {
-      0x5A, 0xA5,                    // Header
-      0x05,                          // Length (5 bytes after header)
-      0x82,                          // Write VP command
-      0x20, 0x00,                    // VP address 0x2000 (WiFi icon)
-      0x00, 0x00                     // Data 0x0000 (WiFi OFF)
+      0x5A, 0xA5,
+      0x05,
+      0x82,
+      0x20, 0x00,
+      0x00, 0x00
     };
     DMTSerial.write(wifiOffCommand, sizeof(wifiOffCommand));
-    delay(100);
+    delay(50);
   }
 }
 
